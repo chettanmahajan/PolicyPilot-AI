@@ -1,0 +1,30 @@
+# Direct dependencies only; transitive ones are resolved by pip/uv.
+# Install:  uv pip install -r requirements.txt
+#      or:  python -m pip install -r requirements.txt
+
+# --- Backend ---
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+pydantic==2.13.5
+pydantic-settings==2.15.0
+email-validator==2.3.0   # backs pydantic's EmailStr
+sqlalchemy==2.0.54
+
+# --- Auth ---
+pyjwt==2.14.0
+bcrypt==5.0.0
+
+# --- AI / RAG ---
+google-genai==2.24.0
+numpy==2.5.3
+
+# --- Frontend ---
+streamlit==1.64.0
+requests==2.34.2
+
+# --- Config ---
+python-dotenv==1.2.3
+
+# --- Tests ---
+pytest==9.1.1
+httpx==0.28.1

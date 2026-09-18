@@ -1,0 +1,57 @@
+[
+  {
+    "case_id": "S01",
+    "message": "My \u20b93,500 order arrived damaged yesterday.",
+    "order_value_inr": 3500,
+    "days_since_delivery": 1,
+    "days_since_dispatch": null,
+    "product_type": "non_food",
+    "opened_status": "opened",
+    "order_status": "delivered",
+    "expected_action": "REQUEST_PHOTOS"
+  },
+  {
+    "case_id": "S02",
+    "message": "I changed my mind about this unopened non-food product. It arrived 10 days ago.",
+    "order_value_inr": 1200,
+    "days_since_delivery": 10,
+    "days_since_dispatch": null,
+    "product_type": "non_food",
+    "opened_status": "unopened",
+    "order_status": "delivered",
+    "expected_action": "APPROVE_RETURN"
+  },
+  {
+    "case_id": "S03",
+    "message": "My parcel has still not arrived and it was dispatched 9 days ago.",
+    "order_value_inr": 850,
+    "days_since_delivery": null,
+    "days_since_dispatch": 9,
+    "product_type": "mixed",
+    "opened_status": "unknown",
+    "order_status": "dispatched",
+    "expected_action": "OPEN_SHIPPING_INVESTIGATION"
+  },
+  {
+    "case_id": "S04",
+    "message": "I ordered strawberry but received chocolate 2 days ago.",
+    "order_value_inr": 650,
+    "days_since_delivery": 2,
+    "days_since_dispatch": null,
+    "product_type": "food",
+    "opened_status": "unopened",
+    "order_status": "delivered",
+    "expected_action": "REPLACE_CORRECT_ITEM"
+  },
+  {
+    "case_id": "S05",
+    "message": "I want to return this.",
+    "order_value_inr": 900,
+    "days_since_delivery": null,
+    "days_since_dispatch": null,
+    "product_type": "unknown",
+    "opened_status": "unknown",
+    "order_status": "delivered",
+    "expected_action": "NEEDS_MORE_INFORMATION"
+  }
+]

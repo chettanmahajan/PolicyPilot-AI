@@ -1,0 +1,30 @@
+# Secrets
+.env
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated embeddings / index
+src/index/
+*.npy
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# uv virtual environment
+.venv/
+
+# The company assignment brief - kept locally, not published
+docs/
