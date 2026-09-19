@@ -6,6 +6,7 @@ and repeats none of the backend's decision or authorization logic.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import requests
@@ -30,12 +31,13 @@ def _headers() -> dict[str, str]:
 
 def api(method: str, path: str, **kwargs: Any) -> tuple[bool, Any]:
     """Call the backend. Returns (ok, payload-or-error-message)."""
+    timeout = kwargs.pop("timeout", TIMEOUT)
     try:
         response = requests.request(
             method,
             f"{settings.api_base_url}{path}",
             headers=_headers(),
-            timeout=TIMEOUT,
+            timeout=timeout,
             **kwargs,
         )
     except requests.RequestException as exc:
@@ -43,6 +45,7 @@ def api(method: str, path: str, **kwargs: Any) -> tuple[bool, Any]:
 
     if response.status_code == 401:
         st.session_state.pop("token", None)
+        st.session_state.pop("active_ticket", None)
         return False, "Your session expired. Please log in again."
 
     if not response.ok:
@@ -76,7 +79,7 @@ def render_auth() -> None:
         with st.form("login"):
             email = st.text_input("Email", key="login_email")
             password = st.text_input("Password", type="password", key="login_pw")
-            if st.form_submit_button("Log in", use_container_width=True):
+            if st.form_submit_button("Log in", width="stretch"):
                 ok, data = api("POST", "/login", json={"email": email, "password": password})
                 if ok:
                     st.session_state["token"] = data["access_token"]
@@ -91,7 +94,7 @@ def render_auth() -> None:
             password = st.text_input(
                 "Password", type="password", key="reg_pw", help="At least 8 characters."
             )
-            if st.form_submit_button("Create account", use_container_width=True):
+            if st.form_submit_button("Create account", width="stretch"):
                 ok, data = api("POST", "/register", json={"email": email, "password": password})
                 if ok:
                     st.success("Account created. Switch to the Log in tab.")
@@ -133,6 +136,171 @@ def render_decision(decision: dict[str, Any] | None) -> None:
 
 
 # --------------------------------------------------------------------------
+# Ticket view: conversation, evidence, follow-ups (used by both tabs)
+# --------------------------------------------------------------------------
+
+EVIDENCE_REQUESTS = {
+    "REQUEST_PHOTOS": "clear photos of the damaged product **and** its packaging",
+    "REQUEST_DEFECT_EVIDENCE": "a clear photo showing the defect",
+}
+
+
+@st.cache_data(ttl=600, show_spinner=False, max_entries=200)
+def _photo_bytes(token: str, ticket_id: int, photo_id: int) -> bytes | None:
+    """Fetch an evidence photo through the authenticated endpoint.
+
+    The token is part of the cache key, so one user's cached photo can never
+    be served to another. Photos are immutable once uploaded, so caching is safe
+    and avoids re-downloading every image on every rerun.
+    """
+    try:
+        response = requests.get(
+            f"{settings.api_base_url}/tickets/{ticket_id}/photos/{photo_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=TIMEOUT,
+        )
+    except requests.RequestException:
+        return None
+    return response.content if response.ok else None
+
+
+def _when(value: str) -> str:
+    return datetime.fromisoformat(value).strftime("%d %b %Y, %H:%M")
+
+
+def _flag(ok: bool, label: str) -> str:
+    return f"{'✅' if ok else '❌'} {label}"
+
+
+def render_timeline(detail: dict[str, Any]) -> None:
+    """Every earlier decision, follow-up and photo on the ticket, oldest first."""
+    rank = {"message": 0, "photo": 1, "decision": 2}  # order within one follow-up
+    events = (
+        [("message", m) for m in detail["messages"]]
+        + [("photo", p) for p in detail["photos"]]
+        + [("decision", d) for d in detail["decisions"][:-1]]  # the latest is shown in full below
+    )
+    events.sort(key=lambda e: (datetime.fromisoformat(e[1]["created_at"]), rank[e[0]]))
+
+    st.markdown("**Conversation**")
+    for kind, item in events:
+        if kind == "message":
+            st.markdown(f"🗨️ **Customer** · {_when(item['created_at'])}")
+            st.write(item["body"])
+        elif kind == "photo":
+            data = _photo_bytes(st.session_state["token"], detail["id"], item["id"])
+            left, right = st.columns([1, 2])
+            if data:
+                left.image(data, caption=item["original_filename"], width="stretch")
+            else:
+                left.caption(f"({item['original_filename']} could not be loaded)")
+            right.markdown(f"📷 **Photo evidence** · {_when(item['created_at'])}")
+            right.caption(
+                " · ".join(
+                    [
+                        _flag(item["is_clear"], "Clear"),
+                        _flag(item["is_relevant"], "Relevant"),
+                        _flag(item["shows_issue"], "Shows the issue"),
+                    ]
+                )
+            )
+            right.write(item["analysis"])
+        else:
+            st.markdown(
+                f"🤖 **Decision** · {_when(item['created_at'])} · "
+                f"`{item['action']}` — {item['reason']}"
+            )
+
+
+def _submit_follow_up(ticket_id: int, message: str, uploads: list[Any]) -> None:
+    files = [("photos", (f.name, f.getvalue(), f.type or "application/octet-stream")) for f in uploads]
+    with st.spinner("Reassessing the ticket against the policies..."):
+        ok, data = api(
+            "POST",
+            f"/tickets/{ticket_id}/follow-ups",
+            data={"message": message} if message else {},
+            files=files or None,
+            timeout=180,  # photo analysis + reassessment, with rate-limit backoff
+        )
+    if ok:
+        st.session_state["flash"] = (ticket_id, "Ticket updated with your new information.")
+        st.rerun()
+    else:
+        st.error(data)
+
+
+def render_ticket(detail: dict[str, Any], key_prefix: str) -> None:
+    ticket_id = detail["id"]
+    key = f"{key_prefix}-{ticket_id}"
+
+    flash = st.session_state.get("flash")
+    if flash and flash[0] == ticket_id:
+        st.success(flash[1])  # cleared by main() once both tabs have rendered
+
+    st.markdown(f"**Ticket #{ticket_id}**")
+    st.write(detail["message"])
+
+    facts = {
+        "Order value (₹)": detail["order_value_inr"],
+        "Days since delivery": detail["days_since_delivery"],
+        "Days since dispatch": detail["days_since_dispatch"],
+        "Product type": detail["product_type"],
+        "Opened": detail["opened_status"],
+        "Order status": detail["order_status"],
+    }
+    # Rendered as markdown rather than st.table/st.dataframe on purpose:
+    # those pull in pandas, which is a heavy import for six key-value
+    # pairs and fails outright on machines where an application-control
+    # policy blocks its compiled DLLs.
+    st.markdown("**Ticket details**")
+    st.markdown(
+        "\n".join(
+            f"- {label}: {'—' if value is None else value}" for label, value in facts.items()
+        )
+    )
+
+    if detail["messages"] or detail["photos"] or len(detail["decisions"]) > 1:
+        st.divider()
+        render_timeline(detail)
+
+    st.divider()
+    st.markdown("**Current decision**")
+    decision = detail.get("decision")
+    render_decision(decision)
+
+    # Photo upload appears only when the policy is actually asking for evidence.
+    needed = EVIDENCE_REQUESTS.get(decision["action"]) if decision else None
+    if needed:
+        st.info(f"📷 **Photos needed.** Please upload {needed}. JPEG, PNG or WEBP, up to 5 MB each.")
+        with st.form(f"{key}-photos", clear_on_submit=True):
+            uploads = st.file_uploader(
+                "Photos",
+                type=["jpg", "jpeg", "png", "webp"],
+                accept_multiple_files=True,
+                key=f"{key}-uploader",
+            )
+            note = st.text_input("Note about the photos (optional)", key=f"{key}-note")
+            if st.form_submit_button("Submit Photos", width="stretch"):
+                if uploads:
+                    _submit_follow_up(ticket_id, note.strip(), uploads)
+                else:
+                    st.error("Choose at least one photo first.")
+
+    with st.form(f"{key}-follow-up", clear_on_submit=True):
+        text = st.text_area(
+            "Add information or answer the question above",
+            placeholder="e.g. It was delivered 2 days ago and the handle is snapped off.",
+            height=90,
+            key=f"{key}-text",
+        )
+        if st.form_submit_button("Submit follow-up", width="stretch"):
+            if text.strip():
+                _submit_follow_up(ticket_id, text.strip(), [])
+            else:
+                st.error("Write a message first.")
+
+
+# --------------------------------------------------------------------------
 # New Decision
 # --------------------------------------------------------------------------
 
@@ -154,12 +322,13 @@ def render_new_decision() -> None:
             height=110,
         )
 
+        # Numbers start empty and empty means "unknown". An earlier version used
+        # "known?" checkboxes, but inside st.form a checkbox does not rerun the
+        # page, so the number inputs only appeared after a first submit - and
+        # the order value silently defaulted to 1000, overriding the message.
         col1, col2 = st.columns(2)
-        known_value = col1.checkbox("Order value known", value=True)
-        order_value = (
-            col1.number_input("Order value (₹)", min_value=0.0, step=100.0, value=1000.0)
-            if known_value
-            else None
+        order_value = col1.number_input(
+            "Order value (₹)", min_value=0.0, step=100.0, value=None, placeholder="unknown"
         )
         order_status = col2.selectbox(
             "Order status", [UNKNOWN, "processing", "dispatched", "delivered"]
@@ -170,47 +339,47 @@ def render_new_decision() -> None:
         opened_status = col4.selectbox("Opened?", [UNKNOWN, "unopened", "opened"])
 
         col5, col6 = st.columns(2)
-        known_delivery = col5.checkbox("Days since delivery known")
-        days_since_delivery = (
-            col5.number_input("Days since delivery", min_value=0, step=1, value=1)
-            if known_delivery
-            else None
+        days_since_delivery = col5.number_input(
+            "Days since delivery", min_value=0, step=1, value=None, placeholder="unknown"
         )
-        known_dispatch = col6.checkbox("Days since dispatch known")
-        days_since_dispatch = (
-            col6.number_input("Days since dispatch", min_value=0, step=1, value=1)
-            if known_dispatch
-            else None
+        days_since_dispatch = col6.number_input(
+            "Days since dispatch", min_value=0, step=1, value=None, placeholder="unknown"
         )
 
-        submitted = st.form_submit_button("Get recommendation", use_container_width=True)
+        submitted = st.form_submit_button("Get recommendation", width="stretch")
 
-    if not submitted:
-        return
+    if submitted:
+        if not message.strip():
+            st.error("Please describe the problem first.")
+        else:
+            payload = {
+                "message": message.strip(),
+                "order_value_inr": order_value,
+                "days_since_delivery": days_since_delivery,
+                "days_since_dispatch": days_since_dispatch,
+                "product_type": _optional(product_type),
+                "opened_status": _optional(opened_status),
+                "order_status": _optional(order_status),
+            }
+            with st.spinner("Checking the policies..."):
+                ok, data = api("POST", "/tickets", json=payload)
+            if ok:
+                # Keep the ticket on screen across reruns so the customer can
+                # continue the conversation on it.
+                st.session_state["active_ticket"] = data["id"]
+                st.session_state["flash"] = (data["id"], f"Ticket #{data['id']} created.")
+            else:
+                st.error(data)
 
-    if not message.strip():
-        st.error("Please describe the problem first.")
-        return
-
-    payload = {
-        "message": message.strip(),
-        "order_value_inr": order_value,
-        "days_since_delivery": days_since_delivery,
-        "days_since_dispatch": days_since_dispatch,
-        "product_type": _optional(product_type),
-        "opened_status": _optional(opened_status),
-        "order_status": _optional(order_status),
-    }
-
-    with st.spinner("Checking the policies..."):
-        ok, data = api("POST", "/tickets", json=payload)
-
-    if not ok:
-        st.error(data)
-        return
-
-    st.success(f"Ticket #{data['id']} created.")
-    render_decision(data.get("decision"))
+    active = st.session_state.get("active_ticket")
+    if active:
+        st.divider()
+        ok, detail = api("GET", f"/tickets/{active}")
+        if ok:
+            render_ticket(detail, key_prefix="new")
+        else:
+            st.session_state.pop("active_ticket", None)
+            st.error(detail)
 
 
 # --------------------------------------------------------------------------
@@ -236,37 +405,15 @@ def render_history() -> None:
         action = (ticket.get("action") or "NO DECISION").replace("_", " ").title()
         preview = ticket["message"][:60] + ("..." if len(ticket["message"]) > 60 else "")
 
-        with st.expander(f"#{ticket['id']} — {action} — {preview}"):
+        # Re-open the ticket the customer just updated; its label changes with
+        # the new decision, so Streamlit would otherwise render it collapsed.
+        just_updated = (st.session_state.get("flash") or (None,))[0] == ticket["id"]
+        with st.expander(f"#{ticket['id']} — {action} — {preview}", expanded=just_updated):
             ok, detail = api("GET", f"/tickets/{ticket['id']}")
             if not ok:
                 st.error(detail)
                 continue
-
-            st.markdown("**Ticket**")
-            st.write(detail["message"])
-
-            facts = {
-                "Order value (₹)": detail["order_value_inr"],
-                "Days since delivery": detail["days_since_delivery"],
-                "Days since dispatch": detail["days_since_dispatch"],
-                "Product type": detail["product_type"],
-                "Opened": detail["opened_status"],
-                "Order status": detail["order_status"],
-            }
-            # Rendered as markdown rather than st.table/st.dataframe on purpose:
-            # those pull in pandas, which is a heavy import for six key-value
-            # pairs and fails outright on machines where an application-control
-            # policy blocks its compiled DLLs.
-            st.markdown("**Ticket details**")
-            st.markdown(
-                "\n".join(
-                    f"- {label}: {'—' if value is None else value}"
-                    for label, value in facts.items()
-                )
-            )
-
-            st.divider()
-            render_decision(detail.get("decision"))
+            render_ticket(detail, key_prefix="hist")
 
 
 # --------------------------------------------------------------------------
@@ -283,7 +430,7 @@ def main() -> None:
         st.markdown("### 🧭 PolicyPilot AI")
         ok, user = api("GET", "/me")
         st.caption(f"Signed in as **{user['email']}**" if ok else "Signed in")
-        if st.button("Log out", use_container_width=True):
+        if st.button("Log out", width="stretch"):
             st.session_state.clear()
             st.rerun()
         st.divider()
@@ -294,6 +441,7 @@ def main() -> None:
         render_new_decision()
     with history_tab:
         render_history()
+    st.session_state.pop("flash", None)
 
 
 main()

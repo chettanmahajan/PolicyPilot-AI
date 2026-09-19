@@ -9,6 +9,7 @@ pydantic==2.13.5
 pydantic-settings==2.15.0
 email-validator==2.3.0   # backs pydantic's EmailStr
 sqlalchemy==2.0.54
+python-multipart==0.0.32   # FastAPI form + file uploads (photo evidence)
 
 # --- Auth ---
 pyjwt==2.14.0

@@ -16,6 +16,7 @@ A customer-support agent submits a ticket; the system retrieves the relevant com
 - [Database schema](#database-schema)
 - [Retrieval design](#retrieval-design)
 - [Decision design](#decision-design)
+- [Follow-ups and photo evidence](#follow-ups-and-photo-evidence)
 - [Tests](#tests)
 - [Evaluation](#evaluation)
 - [Design decisions](#design-decisions)
@@ -52,10 +53,12 @@ The frontend never touches the database and never makes a policy judgement of it
 │   ├── schemas.py      Pydantic request + response models (the trust boundary)
 │   ├── actions.py      the closed set of allowed decisions
 │   ├── retrieval.py    load → chunk → embed → cache → cosine search
-│   └── decision.py     prompt assembly, Gemini call, validation, grounding
+│   ├── decision.py     prompt assembly, Gemini call, validation, grounding, reassessment
+│   └── evidence.py     photo validation, private storage, vision analysis
 ├── streamlit_app.py    frontend (Login/Register, New Decision, History)
 ├── evaluate.py         accuracy runner over labelled cases
-├── tests/              61 automated tests, no API key required
+├── tests/              90 automated tests, no API key required
+├── uploads/            private photo storage (created on first upload, gitignored)
 ├── knowledge_base/     the 6 supplied policy documents
 ├── data/tickets.csv    214 historical tickets (used for evaluation only)
 └── sample_test_cases.json
@@ -125,7 +128,9 @@ The first ticket you submit builds the embedding index (one call, ~29 vectors) a
 | `GET` | `/me` | ✅ | The authenticated user |
 | `POST` | `/tickets` | ✅ | Submit a ticket, run the pipeline, persist → `201` |
 | `GET` | `/tickets` | ✅ | The caller's own tickets |
-| `GET` | `/tickets/{id}` | ✅ | One ticket and its decision |
+| `GET` | `/tickets/{id}` | ✅ | One ticket: current decision, decision history, follow-ups, photos |
+| `POST` | `/tickets/{id}/follow-ups` | ✅ | Continue a ticket with a message and/or photos (multipart); reassesses it → `201` |
+| `GET` | `/tickets/{id}/photos/{photo_id}` | ✅ | Download one of your own evidence photos |
 | `GET` | `/health` | — | Liveness check |
 
 Protected endpoints use `Authorization: Bearer <JWT>`.
@@ -171,8 +176,10 @@ curl -X POST localhost:8000/tickets \
 | `401` | Missing, malformed, expired or wrongly-signed token; bad login |
 | `404` | Ticket does not exist **or** belongs to another user (deliberately indistinguishable) |
 | `409` | Email already registered |
-| `422` | Payload failed validation |
-| `503` | Gemini unavailable or its output failed validation twice — nothing is persisted |
+| `413` | A photo is larger than 5 MB |
+| `415` | A file is not a JPEG, PNG or WEBP image (checked from its bytes, not its name) |
+| `422` | Payload failed validation; empty follow-up; more than 5 photos |
+| `503` | Gemini unavailable or its output failed validation twice — nothing is persisted, no files are written |
 
 ## Database schema
 
@@ -180,19 +187,35 @@ curl -X POST localhost:8000/tickets \
 users                      tickets                        decisions
 ─────                      ───────                        ─────────
 id           PK            id              PK             id           PK
-email        UNIQUE   ┌──< user_id         FK        ┌──< ticket_id    FK UNIQUE
+email        UNIQUE   ┌──< user_id         FK        ┌──< ticket_id    FK
 password_hash          │   message                    │    action
 created_at             │   order_value_inr            │    reason
                        │   days_since_delivery        │    confidence
                        │   days_since_dispatch        │    sources      JSON
                        │   product_type               │    created_at
                        │   opened_status              │
-                       │   order_status               │
-                       │   created_at ─────────────────┘
-                       └── (one user → many tickets; one ticket → one decision)
+                       │   order_status               │   ticket_messages
+                       │   created_at                 │   ───────────────
+                       │                              ├──< ticket_id  FK
+                       │                              │    body, created_at
+                       │                              │
+                       │                              │   ticket_photos
+                       │                              │   ─────────────
+                       │                              └──< ticket_id  FK
+                       │                                   stored_name  (random, server-only)
+                       │                                   original_filename, content_type
+                       │                                   size_bytes, sha256
+                       │                                   analysis, is_clear, is_relevant,
+                       │                                   shows_issue, created_at
+                       └── one user → many tickets; one ticket → many decisions,
+                           follow-up messages and photos
 ```
 
 The six structured columns on `tickets` are nullable on purpose: a missing value is exactly what should drive a `NEEDS_MORE_INFORMATION` decision, so it has to be representable.
+
+A ticket keeps **every** decision it has ever had — a reassessment appends a new row rather than overwriting — and the API's `decision` field is simply the latest. Photo bytes are never stored in SQLite: `ticket_photos` holds metadata, and the image lives on disk under `uploads/`.
+
+**Upgrading an older database:** the first version made `decisions.ticket_id` UNIQUE (one decision per ticket), and SQLite can't drop that constraint in place. Delete `policypilot.db` and restart the backend; the new schema is created on startup.
 
 ## Retrieval design
 
@@ -217,13 +240,44 @@ No Pinecone, FAISS, Chroma, LangChain or LlamaIndex; the assignment explicitly s
 - **`temperature=0`** so evaluation runs are reproducible.
 - **Policies are the only authority.** `data/tickets.csv` is never read at request time — `DATA_NOTES.md` requires decisions to come from the policies, not from looking up a similar past ticket.
 
+## Follow-ups and photo evidence
+
+A ticket is a conversation, not a one-shot answer. Under the current decision, the ticket view has a **follow-up box**. When the decision is `REQUEST_PHOTOS` or `REQUEST_DEFECT_EVIDENCE`, it also has a **photo upload** control. Both go to one endpoint, `POST /tickets/{id}/follow-ups`, and both reassess the **same** ticket.
+
+```
+REQUEST_PHOTOS ──▶ customer uploads photos (+ optional note)
+   ① validate: type from magic bytes, ≤ 5 MB each, ≤ 5 per upload    → 413 / 415 / 422
+   ② Gemini call A: describe ONLY what is visible in each photo
+        → {description, is_clear, is_relevant, shows_issue}
+   ③ Gemini call B: reassess with the original complaint + fields,
+        every follow-up, every photo description, earlier decisions,
+        and freshly retrieved policies
+   ④ guardrail: no approval after an evidence request unless at least
+        one photo is clear AND relevant AND shows the problem
+   ⑤ only now write files + rows, all or nothing
+```
+
+**Why two calls.** The decision model never sees the raw image. It reasons over a neutral written description of what is visible. That makes the evidence auditable, since the description is stored and shown to the user. It is also the main defence against "a photo exists, so approve".
+
+**Why a guardrail in code.** `damaged_goods.md` rule 3 says photographs must be requested *before* a refund or replacement is approved, and `defective_products.md` rule 2 says the same for defect evidence. The prompt already tells the model this. `enforce_evidence_requirement()` makes it deterministic: an approval after an evidence request is turned back into the request unless a usable photo exists. It adds no new policy. It only makes sure the existing rule is enforced.
+
+**Secure storage.**
+- Files are saved as `uploads/{uuid4}.{jpg|png|webp}`. The customer's filename is only display metadata; it never reaches a filesystem path, and path components such as `../../` are stripped.
+- The type is detected from the file's bytes. A text file renamed `.png` is rejected with `415`.
+- Size is capped *while reading*, so an oversized upload is never fully buffered.
+- `uploads/` is never mounted as a static route. The only way to read a photo is `GET /tickets/{id}/photos/{photo_id}`, which runs the same owner-only query as every other ticket route and returns `404` for anyone else. Responses carry `X-Content-Type-Options: nosniff` and `Cache-Control: private, no-store`.
+- The API never returns the stored filename or any server path.
+- Text written inside an image is treated as content to describe, never as instructions. This is stated explicitly in the vision prompt, as a guard against prompt injection.
+
+Follow-up messages can also fill in facts missing from the original form ("it was delivered 5 days ago"), and they steer retrieval, so a conversation can move onto a different policy. If the customer's words clearly contradict a structured field, the model is told to ask rather than silently pick one.
+
 ## Tests
 
 ```bash
 python -m pytest tests/ -v
 ```
 
-**61 tests, fully automated, no API key needed** — every Gemini call is stubbed, and an autouse fixture fails the test if anything tries to construct a real client.
+**90 tests, fully automated, no API key needed** — every Gemini call (decisions *and* photo analysis) is stubbed, uploads go to a per-test temporary folder, and an autouse fixture fails the test if anything tries to construct a real client.
 
 | File | Covers |
 |---|---|
@@ -231,6 +285,7 @@ python -m pytest tests/ -v
 | `test_tickets.py` | creation, validation, history, detail, **ownership**, rollback when the pipeline fails |
 | `test_retrieval.py` | all 6 files load, 29 chunks, thresholds survive chunking, cosine ranking, index round-trip and fingerprinting |
 | `test_decision.py` | schema rejection of invented actions / out-of-range confidence / extra keys, whole-document expansion, hallucinated-citation dropping, retry-once-then-fail |
+| `test_followups.py` | follow-ups stay on the same ticket and keep earlier decisions; the whole conversation reaches the reassessment; photos saved under random names with no path exposed; owner-only download with safe headers; text-renamed-png / gif / html / empty / oversized / too-many uploads rejected with nothing written; AI failure leaves no rows or files; **Bob can't post to, upload to or download from Alice's ticket**; the guardrail blocks approval for blurry, irrelevant or no-damage photos |
 
 The authorization requirement called out in the assignment is `test_alice_cannot_read_bobs_ticket_by_id`, plus `test_unknown_and_forbidden_ids_are_indistinguishable` which asserts a forbidden id and a nonexistent id return byte-identical responses.
 
@@ -291,7 +346,12 @@ The runner paces itself to `--rpm` (default 5) because the Gemini free tier is t
   from src.retrieval import get_client
   print([m.name for m in get_client().models.list()])
   ```
-- **Every ticket costs two Gemini calls** (one embedding, one decision), with no caching of repeated tickets.
+- **Every ticket costs two Gemini calls** (one embedding, one decision), with no caching of repeated tickets. A text follow-up costs the same again; a **photo submission costs one more** (the vision analysis). On the free tier that is roughly 6–10 photo submissions a day.
+- **Photos are stored exactly as uploaded, including EXIF metadata** — which can contain the GPS location where the photo was taken. Stripping it would mean re-encoding every image (Pillow), which the project currently avoids depending on. Worth adding before real customer use.
+- **Photos can't be deleted** by the customer, and there is no retention policy; they live until `uploads/` is cleared.
+- **Photo storage is the local disk.** Fine for one server; multiple servers would need shared or object storage.
+- **Vision analysis is only as good as the model.** It is asked to describe, not judge, and the guardrail stops unusable photos unlocking an approval — but a clear photo of *some other* broken mug would pass. It is evidence, not proof, and a human should review high-value approvals.
+- **The Streamlit photo upload itself is manually tested only.** Streamlit's test harness can't drive `file_uploader`; the upload is covered end to end at the API level (automated and live), and the rest of the UI with `AppTest`.
 - **The index is process-local.** `get_index()` is `lru_cache`d, so multiple uvicorn workers each hold their own copy. Harmless at this size.
 - **No refresh tokens or logout revocation.** A JWT stays valid until it expires; logout only clears it client-side.
 - **No pagination** on `GET /tickets`.

@@ -147,6 +147,88 @@ only.
 
 ---
 
+## Feature: ticket follow-ups and photo evidence
+
+Added after the core assignment was complete: customers can continue the same
+ticket with more information, upload photos when the policy asks for them, and
+have the ticket reassessed. The approach was agreed before any code changed:
+inspect first, present a plan, then build.
+
+### Decisions made along the way
+
+- **Keep every decision.** `decisions.ticket_id` was UNIQUE; it no longer is.
+  A reassessment appends a row, and `Ticket.decision` is now a property that
+  returns the latest. The existing API field kept its meaning, so the 61
+  existing tests passed without changes to their assertions.
+- **Two Gemini calls for photos, not one.** Call A describes what is visible;
+  call B decides from that text. The decision model never sees the image, so
+  it can't be swayed by the mere existence of a photo, and the description is
+  stored and shown - the evidence is auditable.
+- **A code-level guardrail on approvals.** Asking the model not to approve
+  without usable evidence is necessary but not sufficient. After an evidence
+  request, `enforce_evidence_requirement()` turns an approval back into the
+  request unless at least one photo is clear, relevant *and* shows the issue.
+  This is the existing policy (damaged_goods rule 3, defective_products rule 2)
+  made deterministic, not a new rule.
+- **A third photo flag, `shows_issue`.** Planned with two flags (clear,
+  relevant). A clear photo of an intact mug is both clear and relevant, so two
+  flags could not stop it unlocking an approval.
+- **Type from magic bytes, no Pillow.** The standard library decides whether a
+  file is JPEG/PNG/WEBP from its first bytes. Pillow is installed but unused;
+  it would only be needed to strip EXIF (see limitations).
+- **All-or-nothing.** Files are written only after both AI calls succeed. A
+  failure returns 503 with no rows and no files - the same rule as ticket
+  creation. The customer still has their photos and can resubmit.
+- **No new actions.** "Keep the ticket pending" maps onto the existing
+  REQUEST_PHOTOS / NEEDS_MORE_INFORMATION. A PENDING value would have broken
+  the 15-action vocabulary the evaluation scores against.
+
+### Bugs found while building it
+
+| # | Problem | How it surfaced | Fix |
+|---|---|---|---|
+| 11 | **Form inputs only appeared after a first submit.** The New Decision form used "known?" checkboxes to reveal number inputs, but inside `st.form` widgets don't rerun the page, so the inputs stayed hidden until the form had been submitted once. | Your own saved data: tickets 1–2 had no delivery days at all; later ones did. | Number inputs that start empty, where empty = unknown. Works inside forms. |
+| 12 | **The order value silently defaulted to ₹1,000.** Its checkbox started ticked with 1000 pre-filled, so a message saying "₹3,500" was overridden and the ticket was wrongly approved. | Tickets 3 and 4 had identical messages but different decisions; the stored fields showed 1000 vs 3500. | Same fix as #11. The prompt now also says: if the words contradict a field, ask - don't pick one. |
+| 13 | `use_container_width` is deprecated in the installed Streamlit (removal date already passed), including in the original code. | Warnings in the UI test run. | Replaced all 7 uses with `width="stretch"`. |
+| 14 | A test stub for `select_context` accepted one argument; retrieval now also takes follow-up text. 5 tests failed. | Running the existing suite straight after the change. | Updated the stub's signature; no assertion changed. |
+
+### Were the new tests actually testing anything?
+
+29 new tests passed on the first run, which deserves suspicion. Two deliberate
+mutations were applied and then reverted:
+
+- Removing the owner filter from `_owned_ticket()` → **3 tests failed**
+  (including the new Bob-vs-Alice photo test).
+- Disabling `enforce_evidence_requirement()` → **5 tests failed**.
+
+Both files were restored and diffed byte-for-byte against backups.
+
+### Verification
+
+| What | Result |
+|---|---|
+| Automated suite | **90 passed** (61 existing + 29 new), offline |
+| Live: ₹3,500 damaged mug ticket | `REQUEST_PHOTOS`, cites `damaged_goods.md` rule 3 |
+| Live: upload a black-and-white **checkerboard** as "the broken mug" | Vision: *"a black and white checkerboard pattern. No coffee mug or packaging is visible"* → `is_relevant=false, shows_issue=false`. Decision stayed `REQUEST_PHOTOS`, asking for a clear photo of the mug and packaging. **Not approved.** Same ticket, both decisions kept. |
+| Live: storage | One file on disk, 32-hex-char random name; API response contains no stored name or path; owner download byte-identical, `nosniff` set |
+| Live: another user | Bob → read / follow-up / upload / download = `404, 404, 404, 404`; no token = `401` |
+| Live: bad files | text-as-`.png` → `415`, GIF → `415`, 6 MB → `413`; nothing written |
+| Live: missing information | "I want to return this." → `NEEDS_MORE_INFORMATION` → customer follow-up with the facts → `APPROVE_RETURN`, **same ticket** |
+| UI (`AppTest`, live backend) | Photo request banner, upload form, both buttons, conversation timeline, photo rendered through the authenticated endpoint, History rows; a follow-up submitted **through the form** saved to the same ticket and showed the success banner after rerun; number fields start empty |
+| Regression (`evaluate.py`) | **5/5** with the new prompt - but on `gemini-3.1-flash-lite` (see below) |
+
+**Quota caveat, stated plainly.** The daily 20-request limit for
+`gemini-3.5-flash` ran out partway through the UI check; the UI displayed the
+503 cleanly and saved nothing (verified). The remaining UI step and the
+regression evaluation were run with `GEMINI_MODEL=gemini-3.1-flash-lite` set for
+that process only. The project default is unchanged. Re-running
+`python evaluate.py` on `gemini-3.5-flash` after the quota resets is still
+outstanding.
+
+**Not verified by me:** a real photo of genuine damage leading to
+`APPROVE_REFUND_OR_REPLACEMENT`. That needs a real damaged-product photo; it is
+a manual check in the app (see DEMO.md).
+
 ## Things I would do next
 
 - **Finish the generalisation run.** Scoring all 214 historical tickets is the

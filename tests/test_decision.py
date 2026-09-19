@@ -175,7 +175,7 @@ def stub_context(monkeypatch):
     monkeypatch.setattr(
         decision_module,
         "select_context",
-        lambda ticket: [chunk("damaged_goods.md", "3")],
+        lambda ticket, extra_query="": [chunk("damaged_goods.md", "3")],
     )
 
 

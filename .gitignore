@@ -28,3 +28,12 @@ Thumbs.db
 
 # The company assignment brief - kept locally, not published
 docs/
+
+# Customer photo evidence - private, never committed
+uploads/
+
+# Local test photos dropped in the project root - never published
+/*.jpg
+/*.jpeg
+/*.png
+/*.webp

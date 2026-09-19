@@ -33,5 +33,11 @@ class Settings(BaseSettings):
     index_path: Path = PROJECT_ROOT / "src" / "index" / "policy_index.npz"
     retrieval_top_k: int = 6
 
+    # Customer photo evidence. Kept in a private folder that is never served
+    # statically; the only way to read a photo is the owner-checked endpoint.
+    uploads_dir: Path = PROJECT_ROOT / "uploads"
+    max_photo_bytes: int = 5 * 1024 * 1024
+    max_photos_per_upload: int = 5
+
 
 settings = Settings()  # type: ignore[call-arg]

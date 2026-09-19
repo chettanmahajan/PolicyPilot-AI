@@ -80,6 +80,31 @@ class TicketSummary(BaseModel):
     confidence: float | None = None
 
 
+class MessageOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    body: str
+    created_at: datetime
+
+
+class PhotoOut(BaseModel):
+    """Photo metadata for clients. Deliberately omits the on-disk filename:
+    the image is only reachable through the owner-checked download endpoint."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    original_filename: str
+    content_type: str
+    size_bytes: int
+    analysis: str
+    is_clear: bool
+    is_relevant: bool
+    shows_issue: bool
+    created_at: datetime
+
+
 class TicketOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -92,7 +117,21 @@ class TicketOut(BaseModel):
     opened_status: str | None
     order_status: str | None
     created_at: datetime
-    decision: DecisionOut | None = None
+    decision: DecisionOut | None = None  # the current (latest) decision
+    decisions: list[DecisionOut] = Field(default_factory=list)  # full history, oldest first
+    messages: list[MessageOut] = Field(default_factory=list)
+    photos: list[PhotoOut] = Field(default_factory=list)
+
+
+class PhotoAnalysis(BaseModel):
+    """What the vision model reports about one photo - observation only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: str = Field(min_length=1, max_length=1000)
+    is_clear: bool       # in focus, lit, subject visible
+    is_relevant: bool    # shows the product/packaging the ticket is about
+    shows_issue: bool    # the reported problem (e.g. damage) is visibly present
 
 
 class LLMDecision(BaseModel):

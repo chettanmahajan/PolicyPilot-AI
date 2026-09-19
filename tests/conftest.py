@@ -18,14 +18,22 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 from src import models  # noqa: E402,F401  - registers mappers
 from src.actions import Action  # noqa: E402
 from src.api import app  # noqa: E402
+from src.config import settings  # noqa: E402
 from src.database import Base, get_db  # noqa: E402
-from src.schemas import LLMDecision  # noqa: E402
+from src.schemas import LLMDecision, PhotoAnalysis  # noqa: E402
 
 STUB_DECISION = LLMDecision(
     action=Action.REQUEST_PHOTOS,
     confidence=0.91,
     reason="Stubbed decision used by the automated tests.",
     sources=["damaged_goods.md"],
+)
+
+STUB_ANALYSIS = PhotoAnalysis(
+    description="A white mug with a large crack along one side, next to a torn box.",
+    is_clear=True,
+    is_relevant=True,
+    shows_issue=True,
 )
 
 
@@ -77,9 +85,17 @@ def db_session():
 
 
 @pytest.fixture
-def client(db_session, monkeypatch):
-    """TestClient wired to the in-memory DB, with the LLM call stubbed out."""
-    monkeypatch.setattr("src.api.generate_decision", lambda ticket: STUB_DECISION)
+def client(db_session, monkeypatch, tmp_path):
+    """TestClient wired to the in-memory DB, with both LLM calls stubbed out.
+
+    Uploads go to a per-test temporary folder, never the real uploads/ dir.
+    """
+    monkeypatch.setattr("src.api.generate_decision", lambda ticket, history=None: STUB_DECISION)
+    monkeypatch.setattr(
+        "src.api.analyze_photos",
+        lambda photos, complaint: [STUB_ANALYSIS for _ in photos],
+    )
+    monkeypatch.setattr(settings, "uploads_dir", tmp_path / "uploads")
 
     def override_get_db():
         yield db_session

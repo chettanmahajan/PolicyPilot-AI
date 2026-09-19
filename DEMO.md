@@ -61,6 +61,18 @@ Submit a second ticket with **only** a message:
 
 > "With nothing else to go on, it returns NEEDS_MORE_INFORMATION rather than inventing an answer. That's a requirement of the brief — the system has to know when it can't decide."
 
+## Optional (+30s) · Photo evidence
+
+Replaces the missing-information step if you'd rather show photos. On the ₹3,500 damaged ticket, which is showing `REQUEST_PHOTOS`:
+
+1. Under **Photos needed**, choose your broken-mug and broken-box photos, add the note `Here is the mug and the box`, and click **Submit Photos**.
+2. The conversation shows each photo with ✅/❌ for *Clear · Relevant · Shows the issue*, plus what the AI could see.
+3. The **current decision** updates on the **same ticket**. With genuine damage photos inside the 7-day window, expect `APPROVE_REFUND_OR_REPLACEMENT`.
+
+> "The AI first describes only what's visible. A second call makes the decision against the policy. And the code won't allow an approval unless at least one photo actually shows the damage. Uploading a random picture doesn't get you a refund."
+
+**Rehearse this once before recording.** It's the one path I couldn't verify myself, because it needs your real photos. Each photo submission costs 2 Gemini calls.
+
 ## 1:20 – 1:35 · History
 
 Open **History**, expand the first ticket.
