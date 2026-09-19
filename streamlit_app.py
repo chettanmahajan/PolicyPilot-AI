@@ -253,8 +253,16 @@ def render_history() -> None:
                 "Opened": detail["opened_status"],
                 "Order status": detail["order_status"],
             }
-            st.table(
-                {"Field": list(facts), "Value": ["—" if v is None else v for v in facts.values()]}
+            # Rendered as markdown rather than st.table/st.dataframe on purpose:
+            # those pull in pandas, which is a heavy import for six key-value
+            # pairs and fails outright on machines where an application-control
+            # policy blocks its compiled DLLs.
+            st.markdown("**Ticket details**")
+            st.markdown(
+                "\n".join(
+                    f"- {label}: {'—' if value is None else value}"
+                    for label, value in facts.items()
+                )
             )
 
             st.divider()

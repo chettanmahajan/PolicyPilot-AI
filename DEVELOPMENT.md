@@ -66,6 +66,7 @@ which is also multi-threaded.
 | # | Problem | How it surfaced | Fix |
 |---|---|---|---|
 | 9 | `lru_cache` is not an initialisation lock; concurrent threads each constructed a Gemini client and the discarded ones closed the shared transport. | `evaluate.py --workers 4`. | `get_client()` / `get_index()` behind a `threading.RLock`; `decision.py` reuses the shared client instead of constructing one per request. |
+| 10 | `st.table` in the History view crashed with `ImportError: DLL load failed while importing timedeltas: An Application Control policy has blocked this file`. Streamlit renders tables through pandas, and pandas' compiled extensions are blocked on this machine. | Only when a ticket actually existed — with an empty history the code path never ran, so every earlier UI check passed. | Replaced with plain markdown. Six key-value pairs never needed a dataframe; this both fixes the crash and drops a heavy import. |
 
 ### Where I overrode the AI's default suggestions
 
@@ -96,6 +97,8 @@ Commands actually run, and what they produced.
 | Evaluation | `python evaluate.py` | **5/5, 100%** (see below) |
 | Live API end-to-end | `uvicorn src.api:app --port 8002` + curl | register → `201`; login → JWT; `/me` → `200`; `/me` unauthenticated → `401`; `POST /tickets` → real decision |
 | Live authorization | Alice's ticket requested with Bob's token | Bob → `404 {"detail":"Ticket not found"}`; Alice → `200`; Bob's history → `[]` |
+| Frontend execution | `streamlit.testing.v1.AppTest` against the live API | Login screen, authenticated tabs, sidebar user, empty-history message, invalid token handled without crashing |
+| Frontend submission | Filled and submitted the New Decision form | `Ticket #2 created.` → `Request Photos`, reason + policy sources rendered, row appears in History |
 
 ### Evaluation results
 
