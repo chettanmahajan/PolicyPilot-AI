@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -27,6 +28,9 @@ import numpy as np
 from src.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Guards one-time construction of the shared client and the index.
+_init_lock = threading.RLock()
 
 # "1. Some rule text" at the start of a line, running until the next such marker.
 _RULE_RE = re.compile(r"^\s*(\d+)\.\s+(.*?)(?=^\s*\d+\.\s+|\Z)", re.MULTILINE | re.DOTALL)
@@ -99,13 +103,25 @@ def kb_fingerprint(chunks: list[Chunk]) -> str:
 
 
 @lru_cache(maxsize=1)
-def _client():
+def _make_client():
     """Created lazily so importing this module never requires an API key."""
     from google import genai
 
     if not settings.gemini_api_key:
         raise RuntimeError("GEMINI_API_KEY is not set")
     return genai.Client(api_key=settings.gemini_api_key)
+
+
+def get_client():
+    """The one shared Gemini client.
+
+    Lock-guarded because `lru_cache` alone does not stop two threads entering
+    the factory at once. When that happened, the surplus clients were garbage
+    collected and closed the HTTP transport out from under the cached one
+    ("Cannot send a request, as the client has been closed").
+    """
+    with _init_lock:
+        return _make_client()
 
 
 def embed(texts: list[str], *, task_type: str) -> np.ndarray:
@@ -115,7 +131,7 @@ def embed(texts: list[str], *, task_type: str) -> np.ndarray:
     """
     from google.genai import types
 
-    response = _client().models.embed_content(
+    response = get_client().models.embed_content(
         model=settings.embedding_model,
         contents=texts,
         config=types.EmbedContentConfig(task_type=task_type),
@@ -164,7 +180,7 @@ def build_index(index_path: Path | None = None, kb_dir: Path | None = None) -> P
 
 
 @lru_cache(maxsize=1)
-def get_index() -> PolicyIndex:
+def _load_index() -> PolicyIndex:
     """Load the cached index, rebuilding it if missing or stale."""
     index_path = settings.index_path
     current = load_chunks()
@@ -180,6 +196,12 @@ def get_index() -> PolicyIndex:
         logger.info("Knowledge base changed - rebuilding index")
 
     return build_index()
+
+
+def get_index() -> PolicyIndex:
+    """Thread-safe accessor: only one thread may build or load the index."""
+    with _init_lock:
+        return _load_index()
 
 
 def retrieve(query: str, top_k: int | None = None) -> list[RetrievedChunk]:

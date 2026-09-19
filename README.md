@@ -88,8 +88,8 @@ Then edit `.env`:
 | `JWT_SECRET` | **yes** | — | HMAC key for signing JWTs; **must be ≥ 32 characters** |
 | `JWT_EXPIRE_MINUTES` | no | `60` | Token lifetime |
 | `DATABASE_URL` | no | `sqlite:///policypilot.db` | SQLite location |
-| `GEMINI_MODEL` | no | `gemini-2.0-flash` | Decision model |
-| `EMBEDDING_MODEL` | no | `text-embedding-004` | Embedding model |
+| `GEMINI_MODEL` | no | `gemini-3.5-flash` | Decision model |
+| `EMBEDDING_MODEL` | no | `gemini-embedding-001` | Embedding model |
 | `API_BASE_URL` | no | `http://127.0.0.1:8000` | Where Streamlit finds the API |
 
 Generate a secret with:
@@ -198,7 +198,7 @@ The six structured columns on `tickets` are nullable on purpose: a missing value
 
 1. **Load** every `.md` in `knowledge_base/`.
 2. **Chunk** on numbered rules — one chunk per rule, prefixed with the document heading. The policies are already written as short self-contained clauses, so this is a natural boundary; it also means a chunk is always a *complete* rule and `sources` can point at the exact file.
-3. **Embed** each chunk with Gemini `text-embedding-004` (`task_type=RETRIEVAL_DOCUMENT`), L2-normalised.
+3. **Embed** each chunk with Gemini `gemini-embedding-001` (`task_type=RETRIEVAL_DOCUMENT`), L2-normalised to 3072 dimensions.
 4. **Cache** the vectors to `src/index/policy_index.npz` with a SHA-256 fingerprint of the chunk texts; a mismatch rebuilds the index automatically.
 5. **Query** — the ticket message plus its structured facts, embedded with `task_type=RETRIEVAL_QUERY`.
 6. **Search** — cosine similarity is a plain dot product (both sides are unit vectors); take top-k.
@@ -211,7 +211,7 @@ No Pinecone, FAISS, Chroma, LangChain or LlamaIndex; the assignment explicitly s
 ## Decision design
 
 - **Closed action set.** `Action` (in `src/actions.py`) is a `StrEnum`. The assignment only names `REQUEST_PHOTOS` and `NEEDS_MORE_INFORMATION`, so the full 15-value vocabulary was taken from the distinct `resolved_action` values in `data/tickets.csv` — the only place the complete list appears.
-- **Native structured output.** The Gemini call passes `response_schema=LLMDecision` with `response_mime_type="application/json"`, so the shape is enforced by the API rather than by asking nicely.
+- **Native structured output.** The Gemini call passes an explicit `response_schema` (including the action enum) with `response_mime_type="application/json"`, so the shape is enforced by the API rather than by asking nicely. The wire schema is declared by hand rather than derived from `LLMDecision`, because that model's `extra="forbid"` renders as `additionalProperties: false`, which the Gemini API rejects. Keeping them separate lets the wire format stay API-compatible while validation stays strict.
 - **Validation before persistence.** The reply is re-validated with Pydantic (`extra="forbid"`, `0 ≤ confidence ≤ 1`, action must be in the enum). Invalid output is retried once with a stricter instruction; a second failure raises and the request returns `503` rather than storing a guess.
 - **Source grounding.** Citations not present in the retrieved context are dropped, so `sources` can only ever name policy files the model was actually shown.
 - **`temperature=0`** so evaluation runs are reproducible.
@@ -240,19 +240,32 @@ Only `evaluate.py` needs a live key.
 
 ```bash
 python evaluate.py                    # the 5 supplied sample cases
-python evaluate.py --csv --limit 50   # historical tickets, generalisation check
+python evaluate.py --csv --limit 20   # historical tickets, generalisation check
+python evaluate.py --rpm 60           # faster, if you have a paid key
 ```
 
-Output format:
+Measured result on the supplied cases (`gemini-3.5-flash`, `temperature=0`):
 
 ```
-N test cases
-Correct: ...
-Incorrect: ...
-Accuracy: ...%
+==============================================================================
+CASE     EXPECTED                       PREDICTED
+------------------------------------------------------------------------------
+S01      REQUEST_PHOTOS                 REQUEST_PHOTOS                 OK
+S02      APPROVE_RETURN                 APPROVE_RETURN                 OK
+S03      OPEN_SHIPPING_INVESTIGATION    OPEN_SHIPPING_INVESTIGATION    OK
+S04      REPLACE_CORRECT_ITEM           REPLACE_CORRECT_ITEM           OK
+S05      NEEDS_MORE_INFORMATION         NEEDS_MORE_INFORMATION         OK
+==============================================================================
+5 test cases
+Correct: 5
+Incorrect: 0
+Accuracy: 100%
+==============================================================================
 ```
 
-Failures print the ticket, its facts, the model's confidence, reasoning and sources, so a wrong answer can be diagnosed without a re-run.
+Five cases is a small sample — this shows the pipeline is correct end to end, not that it is 100% accurate in general.
+
+The runner paces itself to `--rpm` (default 5) because the Gemini free tier is tightly rate limited; see [Limitations](#limitations). Failures print the ticket, its facts, the model's confidence, reasoning and sources, so a wrong answer can be diagnosed without a re-run.
 
 `--csv` scores against `data/tickets.csv`. This guards against overfitting to the five visible cases — `DATA_NOTES.md` calls them "the visible sample test cases", implying held-back ones. The CSV is a *scoring* input only; the running system never reads it.
 
@@ -269,7 +282,16 @@ Failures print the ticket, its facts, the model's confidence, reasoning and sour
 
 ## Limitations
 
-- **Every ticket costs two Gemini calls** (one embedding, one decision) and there is no caching of repeated tickets or rate-limit backoff. Fine at assignment scale, not at production traffic.
+- **The Gemini free tier is the binding constraint.** Quotas are per model: ~5 requests/minute and **20 requests/day** for `gemini-3.5-flash`. Consequences:
+  - `evaluate.py --csv` over all 214 historical tickets is **not feasible** on a free key. Use `--limit` (≤ 20/day), spread it over days, switch `GEMINI_MODEL` to another model with its own daily quota, or enable billing.
+  - If you exhaust a model's daily quota, every request returns `429 RESOURCE_EXHAUSTED` until it resets — no amount of retrying helps. Switch `GEMINI_MODEL` in `.env`.
+  - The client retries transient `503`/`429` up to 4 times, honouring the `retryDelay` the API returns, but it cannot retry past a daily cap.
+- **Model availability shifts.** `text-embedding-004` and `gemini-2.0-flash` are both gone; `gemini-2.5-flash` is closed to new keys. If you hit a `404`, list what your key can actually use:
+  ```python
+  from src.retrieval import get_client
+  print([m.name for m in get_client().models.list()])
+  ```
+- **Every ticket costs two Gemini calls** (one embedding, one decision), with no caching of repeated tickets.
 - **The index is process-local.** `get_index()` is `lru_cache`d, so multiple uvicorn workers each hold their own copy. Harmless at this size.
 - **No refresh tokens or logout revocation.** A JWT stays valid until it expires; logout only clears it client-side.
 - **No pagination** on `GET /tickets`.

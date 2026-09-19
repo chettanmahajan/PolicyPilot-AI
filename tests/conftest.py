@@ -47,11 +47,11 @@ def no_network(monkeypatch):
         )
 
     monkeypatch.setattr(google.genai, "Client", forbidden)
-    retrieval.get_index.cache_clear()
-    retrieval._client.cache_clear()
+    retrieval._load_index.cache_clear()
+    retrieval._make_client.cache_clear()
     yield
-    retrieval.get_index.cache_clear()
-    retrieval._client.cache_clear()
+    retrieval._load_index.cache_clear()
+    retrieval._make_client.cache_clear()
 
 
 @pytest.fixture

@@ -11,12 +11,14 @@ becomes a validation failure rather than a stored decision.
 from __future__ import annotations
 
 import logging
+import re
+import time
 
 from pydantic import ValidationError
 
 from src.actions import Action
 from src.config import settings
-from src.retrieval import RetrievedChunk, get_index
+from src.retrieval import RetrievedChunk, get_client, get_index
 from src.schemas import LLMDecision, TicketCreate
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,50 @@ logger = logging.getLogger(__name__)
 
 class DecisionUnavailableError(RuntimeError):
     """The decision could not be produced (API failure, or unparseable output)."""
+
+
+# Declared explicitly rather than derived from LLMDecision: that model sets
+# `extra="forbid"`, which Pydantic renders as `additionalProperties: false`, and
+# the Gemini API rejects that key outright ("Unknown name additional_properties").
+# Keeping the two separate lets the wire schema stay API-compatible while
+# LLMDecision stays strict for validation. The enum is included so the API
+# itself constrains `action` to the allowed vocabulary.
+# Gemini flash models return 503 UNAVAILABLE under load and 429 when rate
+# limited. Both clear on their own, so they are retried rather than surfaced as
+# a failed decision.
+TRANSIENT_RETRIES = 4
+MAX_BACKOFF_SECONDS = 70
+_TRANSIENT_MARKERS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", "INTERNAL")
+
+# The 429 body carries the wait the server actually wants, in both of these
+# shapes. Honouring it matters on the free tier, where the limit is 5 requests
+# per minute and a naive 1-2s backoff simply burns the remaining retries.
+_RETRY_AFTER_RE = re.compile(r"'retryDelay':\s*'([\d.]+)s'|retry in ([\d.]+)s")
+
+
+def _is_transient(exc: Exception) -> bool:
+    return any(marker in str(exc) for marker in _TRANSIENT_MARKERS)
+
+
+def _retry_delay(exc: Exception, attempt: int) -> float:
+    """Server-requested delay if it gave one, else exponential backoff."""
+    match = _RETRY_AFTER_RE.search(str(exc))
+    if match:
+        requested = float(match.group(1) or match.group(2))
+        return min(requested + 1.0, MAX_BACKOFF_SECONDS)
+    return float(2**attempt)
+
+
+RESPONSE_SCHEMA: dict[str, object] = {
+    "type": "OBJECT",
+    "properties": {
+        "action": {"type": "STRING", "enum": [a.value for a in Action]},
+        "confidence": {"type": "NUMBER"},
+        "reason": {"type": "STRING"},
+        "sources": {"type": "ARRAY", "items": {"type": "STRING"}},
+    },
+    "required": ["action", "confidence", "reason", "sources"],
+}
 
 
 SYSTEM_INSTRUCTION = """\
@@ -128,13 +174,14 @@ def format_context(chunks: list[RetrievedChunk]) -> str:
 
 
 def _call_gemini(prompt: str, *, strict_retry: bool = False) -> str:
-    from google import genai
     from google.genai import types
 
     if not settings.gemini_api_key:
         raise DecisionUnavailableError("GEMINI_API_KEY is not set")
 
-    client = genai.Client(api_key=settings.gemini_api_key)
+    # Shared client, not a fresh one per call: constructing them per request
+    # leaks HTTP connections and lets a discarded client close the transport.
+    client = get_client()
     instruction = SYSTEM_INSTRUCTION
     if strict_retry:
         instruction += (
@@ -142,19 +189,31 @@ def _call_gemini(prompt: str, *, strict_retry: bool = False) -> str:
             "with exactly the keys: action, confidence, reason, sources."
         )
 
-    try:
-        response = client.models.generate_content(
-            model=settings.gemini_model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=instruction,
-                response_mime_type="application/json",
-                response_schema=LLMDecision,
-                temperature=0.0,  # deterministic, so evaluation runs are reproducible
-            ),
-        )
-    except Exception as exc:  # noqa: BLE001 - surface any SDK/transport error uniformly
-        raise DecisionUnavailableError(f"Gemini request failed: {exc}") from exc
+    config = types.GenerateContentConfig(
+        system_instruction=instruction,
+        response_mime_type="application/json",
+        response_schema=RESPONSE_SCHEMA,
+        temperature=0.0,  # deterministic, so evaluation runs are reproducible
+    )
+
+    response = None
+    for attempt in range(TRANSIENT_RETRIES):
+        try:
+            response = client.models.generate_content(
+                model=settings.gemini_model, contents=prompt, config=config
+            )
+            break
+        except Exception as exc:  # noqa: BLE001 - uniform handling of SDK/transport errors
+            is_last = attempt == TRANSIENT_RETRIES - 1
+            if is_last or not _is_transient(exc):
+                raise DecisionUnavailableError(f"Gemini request failed: {exc}") from exc
+            delay = _retry_delay(exc, attempt)
+            logger.warning(
+                "Transient Gemini error (%s), retrying in %.0fs",
+                str(exc).split(".")[0][:60],
+                delay,
+            )
+            time.sleep(delay)
 
     if not response.text:
         raise DecisionUnavailableError("Gemini returned an empty response")

@@ -17,12 +17,15 @@ import argparse
 import csv
 import json
 import sys
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
 from src.config import PROJECT_ROOT
 from src.decision import DecisionUnavailableError, generate_decision
+from src.retrieval import get_index
 from src.schemas import TicketCreate
 
 SAMPLE_CASES = PROJECT_ROOT / "sample_test_cases.json"
@@ -105,7 +108,35 @@ def load_csv_cases(path: Path = TICKETS_CSV, limit: int | None = None) -> list[C
     return cases
 
 
+class RateLimiter:
+    """Spaces out requests to stay inside the API quota.
+
+    The Gemini free tier allows 5 generate_content calls per minute. Without
+    pacing, the runner spends its retry budget fighting 429s instead of
+    evaluating, and cases fail for quota reasons rather than wrong answers.
+    """
+
+    def __init__(self, rpm: float) -> None:
+        self.interval = 60.0 / rpm if rpm > 0 else 0.0
+        self._lock = threading.Lock()
+        self._next_at = 0.0
+
+    def wait(self) -> None:
+        if not self.interval:
+            return
+        with self._lock:
+            now = time.monotonic()
+            sleep_for = self._next_at - now
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            self._next_at = max(now, self._next_at) + self.interval
+
+
+_limiter = RateLimiter(rpm=5)
+
+
 def run_case(case: Case) -> Result:
+    _limiter.wait()
     try:
         decision = generate_decision(case.ticket)
     except DecisionUnavailableError as exc:
@@ -164,11 +195,28 @@ def report(results: list[Result]) -> int:
 
 
 def main() -> int:
+    # Windows consoles default to cp1252, which cannot encode the rupee sign
+    # that appears throughout the tickets and policies.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv", action="store_true", help="evaluate data/tickets.csv instead")
     parser.add_argument("--limit", type=int, default=None, help="only run the first N cases")
-    parser.add_argument("--workers", type=int, default=4, help="parallel requests (default 4)")
+    # Default 1: the Gemini free tier allows only 5 requests/minute, so running
+    # cases in parallel just trips the rate limit sooner. Raise it on a paid key.
+    parser.add_argument("--workers", type=int, default=1, help="parallel requests (default 1)")
+    parser.add_argument(
+        "--rpm",
+        type=float,
+        default=5.0,
+        help="requests per minute to stay under (default 5, the free-tier limit)",
+    )
     args = parser.parse_args()
+
+    global _limiter
+    _limiter = RateLimiter(rpm=args.rpm)
 
     cases = load_csv_cases(limit=args.limit) if args.csv else load_sample_cases()
     if args.limit and not args.csv:
@@ -176,6 +224,11 @@ def main() -> int:
 
     label = "historical tickets" if args.csv else "sample test cases"
     print(f"Evaluating {len(cases)} {label}...")
+
+    # Build the index up front so the workers all share one ready index rather
+    # than racing to build it.
+    print("Preparing policy index...")
+    get_index()
 
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
         results = list(pool.map(run_case, cases))

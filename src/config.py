@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60
 
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'policypilot.db'}"
-    gemini_model: str = "gemini-2.0-flash"
-    embedding_model: str = "text-embedding-004"
+    gemini_model: str = "gemini-3.5-flash"
+    embedding_model: str = "gemini-embedding-001"
     api_base_url: str = "http://127.0.0.1:8000"
 
     # Retrieval
