@@ -204,10 +204,6 @@ def get_index() -> PolicyIndex:
         return _load_index()
 
 
-def retrieve(query: str, top_k: int | None = None) -> list[RetrievedChunk]:
-    return get_index().search(query, top_k)
-
-
 if __name__ == "__main__":  # pragma: no cover - manual smoke check
     logging.basicConfig(level=logging.INFO)
     found = load_chunks()

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title">
+  <title id="title">PolicyPilot AI logo</title>
+  <defs>
+    <linearGradient id="ring" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#14C8B0"/>
+      <stop offset="0.55" stop-color="#1C9BE0"/>
+      <stop offset="1" stop-color="#1F5FE0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- tile -->
+  <rect width="256" height="256" rx="56" fill="#FFFFFF"/>
+
+  <!-- compass ring: two arcs; the wide gap at the top-right is where the arrow points out -->
+  <circle cx="128" cy="128" r="72" fill="none" stroke="url(#ring)" stroke-width="18"
+          stroke-linecap="round" stroke-dasharray="200 14 190 48.39" transform="rotate(-25.7 128 128)"/>
+
+  <!-- navigation arrow, pointing up-right; two facets for depth -->
+  <g transform="rotate(45 128 128)">
+    <polygon points="128,38 80,178 128,150" fill="#3D8BFF"/>
+    <polygon points="128,38 128,150 176,178" fill="#1A4FD6"/>
+  </g>
+</svg>

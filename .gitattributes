@@ -1,0 +1,11 @@
+# Normalise line endings in the repository; check out native endings locally.
+* text=auto
+
+# Never touch binary files.
+*.jpg  binary
+*.jpeg binary
+*.png  binary
+*.webp binary
+*.pdf  binary
+*.npz  binary
+*.db   binary

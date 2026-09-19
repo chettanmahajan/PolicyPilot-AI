@@ -11,7 +11,7 @@ The project was built with **Claude Code (Opus 5)** acting as a pair programmer,
 which the assignment explicitly encourages. The workflow was:
 
 1. **Inspection before code.** The agent read the assignment PDF, all six policy
-   documents, `DATA_NOTES.md`, `sample_test_cases.json` and `tickets.csv` before
+   documents, `data/DATA_NOTES.md`, `data/sample_test_cases.json` and `data/tickets.csv` before
    writing anything, and produced a written plan that I reviewed and approved.
 2. **Staged implementation.** Config/DB → auth → ticket endpoints → retrieval →
    decision engine → frontend → evaluation → docs. Tests were run at each stage.
@@ -151,7 +151,7 @@ only.
 
 Added after the core assignment was complete: customers can continue the same
 ticket with more information, upload photos when the policy asks for them, and
-have the ticket reassessed. The approach was agreed before any code changed:
+have the ticket reassessed. The work followed the same pattern as the core build:
 inspect first, present a plan, then build.
 
 ### Decisions made along the way
@@ -187,11 +187,11 @@ inspect first, present a plan, then build.
 
 | # | Problem | How it surfaced | Fix |
 |---|---|---|---|
-| 11 | **Form inputs only appeared after a first submit.** The New Decision form used "known?" checkboxes to reveal number inputs, but inside `st.form` widgets don't rerun the page, so the inputs stayed hidden until the form had been submitted once. | Your own saved data: tickets 1–2 had no delivery days at all; later ones did. | Number inputs that start empty, where empty = unknown. Works inside forms. |
+| 11 | **Form inputs only appeared after a first submit.** The New Decision form used "known?" checkboxes to reveal number inputs, but inside `st.form` widgets don't rerun the page, so the inputs stayed hidden until the form had been submitted once. | Real usage data: the first two tickets saved had no delivery days at all; later ones did. | Number inputs that start empty, where empty = unknown. Works inside forms. |
 | 12 | **The order value silently defaulted to ₹1,000.** Its checkbox started ticked with 1000 pre-filled, so a message saying "₹3,500" was overridden and the ticket was wrongly approved. | Tickets 3 and 4 had identical messages but different decisions; the stored fields showed 1000 vs 3500. | Same fix as #11. The prompt now also says: if the words contradict a field, ask - don't pick one. |
 | 13 | `use_container_width` is deprecated in the installed Streamlit (removal date already passed), including in the original code. | Warnings in the UI test run. | Replaced all 7 uses with `width="stretch"`. |
 | 14 | A test stub for `select_context` accepted one argument; retrieval now also takes follow-up text. 5 tests failed. | Running the existing suite straight after the change. | Updated the stub's signature; no assertion changed. |
-| 15 | **With genuine damage photos, the model approved using the wrong action**: `OFFER_REPLACEMENT_OR_REFUND` (the *shipping-delay* remedy) instead of `APPROVE_REFUND_OR_REPLACEMENT`. Root cause, which predates this feature: the prompt listed the 15 actions as bare names, two of them near-synonyms. | Live test with your real photos (broken mug, crushed box). All 90 tests were passing at the time. | Each action is now described to the model by the situation it belongs to, taken from `tickets.csv`, where every action occurs with exactly one `issue_type`. No thresholds were added. Re-run live: `APPROVE_REFUND_OR_REPLACEMENT`. |
+| 15 | **With genuine damage photos, the model approved using the wrong action**: `OFFER_REPLACEMENT_OR_REFUND` (the *shipping-delay* remedy) instead of `APPROVE_REFUND_OR_REPLACEMENT`. Root cause, which predates this feature: the prompt listed the 15 actions as bare names, two of them near-synonyms. | Live test with real damage photos (a broken mug and a crushed box). All 90 tests were passing at the time. | Each action is now described to the model by the situation it belongs to, taken from `tickets.csv`, where every action occurs with exactly one `issue_type`. No thresholds were added. Re-run live: `APPROVE_REFUND_OR_REPLACEMENT`. |
 | 16 | **The guardrail had a hole.** It blocked only the one "paired" approval, so bug #15's look-alike action would have slipped through **even with an irrelevant photo**. | Same live run: the wrong action went straight past the guard. | The guard now blocks every action that grants money or goods (`GRANTING_ACTIONS`). A regression test covers the exact action that slipped through, and reverting the fix makes 4 tests fail. |
 
 Bugs 15 and 16 are the reason the real-photo test mattered. The mocked suite
@@ -214,7 +214,7 @@ Both files were restored and diffed byte-for-byte against backups.
 | What | Result |
 |---|---|
 | Automated suite | **95 passed** (61 existing + 34 new), offline |
-| Live: **your real photos** (broken red mug; crushed box), reported 1 day after delivery | Vision: *"A red ceramic mug is broken into pieces inside a cardboard shipping box, surrounded by air-filled protective packaging"*; both photos clear / relevant / shows issue. The Getty watermark was ignored. Decision: `REQUEST_PHOTOS` → **`APPROVE_REFUND_OR_REPLACEMENT`** (after fix #15) |
+| Live: **real damage photos** (broken red mug; crushed box), reported 1 day after delivery | Vision: *"A red ceramic mug is broken into pieces inside a cardboard shipping box, surrounded by air-filled protective packaging"*; both photos clear / relevant / shows issue. The Getty watermark was ignored. Decision: `REQUEST_PHOTOS` → **`APPROVE_REFUND_OR_REPLACEMENT`** (after fix #15) |
 | Live: the same real photos, reported **10 days** after delivery | `REJECT_OUTSIDE_WINDOW` → `REJECT_OUTSIDE_WINDOW`: a genuine photo did **not** override the 7-day window. *Run before fix #15; that fix only adds action descriptions, and this ticket never reached a granting action.* |
 | Live: ₹3,500 damaged mug ticket | `REQUEST_PHOTOS`, cites `damaged_goods.md` rule 3 |
 | Live: upload a black-and-white **checkerboard** as "the broken mug" | Vision: *"a black and white checkerboard pattern. No coffee mug or packaging is visible"* → `is_relevant=false, shows_issue=false`. Decision stayed `REQUEST_PHOTOS`, asking for a clear photo of the mug and packaging. **Not approved.** Same ticket, both decisions kept. |
@@ -309,6 +309,63 @@ Each new safety rule was deliberately disabled, then restored:
 **Model caveat:** `gemini-3.5-flash` was still out of daily quota. The live
 reply checks ran on `gemini-flash-lite-latest` and the regression evaluation
 on `gemini-3.5-flash-lite`, set per process; the project default is unchanged.
+
+## Repository preparation
+
+Before publication, the repository was cleaned up without changing any
+application behaviour:
+
+- **Unused code removed:** `retrieval.retrieve()`, a wrapper nothing called any
+  more, and one unused test import. They were found with a static check of
+  every import and top-level definition. All 16 pinned dependencies were
+  confirmed to be in use.
+- **Data files grouped** under `data/` (`sample_test_cases.json`,
+  `DATA_NOTES.md`); `evaluate.py` was updated to the new path.
+- **Configuration:** `.env.example` now lists only the two required values, with
+  the optional overrides commented out, so `src/config.py` stays the single
+  source of defaults. A `.gitattributes` file normalises line endings.
+- **Branding:** `assets/logo.svg` and `assets/banner.svg`, hand-written SVG
+  recreating the project's compass-and-arrow design.
+- **Privacy check:** the full git history was scanned. No API key or JWT
+  secret was ever committed, and `.env` was never tracked. The local
+  database, customer uploads, embedding cache, the assignment brief and the
+  photos used for testing (one of them a watermarked stock image) are all
+  git-ignored.
+
+### Found during the post-cleanup verification
+
+The end-to-end run after the cleanup reported **30/30 checks passed**, but its
+printed output contained this reply to "When will I get my refund?":
+
+> "You are eligible for a refund or a replacement, **and your preference for a
+> refund has been noted**."
+
+No preference had been recorded (that check *did* pass), but the reply told
+the customer one had. Bug #17's fix only inspected the reply when the model's
+`customer_preference` field disagreed with the code. This time the model set
+the field to `"none"` but still wrote "noted" in the text.
+
+| # | Problem | Fix |
+|---|---|---|
+| 18 | A reply could claim an unrecorded preference whenever the structured field and the prose disagreed in that direction. | `claimed_preferences()` finds "preference for / like / want a refund or replacement" in any sentence that says *noted* or *recorded*. Every reply is now checked against what is actually on record, and replaced with a safe reply if it doesn't match. Tests reproduce the exact text; disabling the check fails 2 of them. |
+
+The lesson is the one this document keeps returning to: a check that asserts
+the *state* can pass while the *text the customer reads* is wrong. The
+verification script now checks the reply text too.
+
+### Post-cleanup verification
+
+| What | Result |
+|---|---|
+| Imports, compile, `requirements.txt` dry-run | all clean; nothing to install |
+| Automated suite | **140 passed** |
+| Live end-to-end (isolated database and uploads folder) | **30/30**: health, register, login, `/me`, 401s, RAG decision citing `damaged_goods.md`, ownership 404s, 2-photo upload and analysis, reassessment to `APPROVE_REFUND_OR_REPLACEMENT`, private storage with no path leaked, owner-only download, fake image rejected (415), AI reply to a question, no duplicate decision, stated preference recorded, persistence |
+| Live re-check after fix #18 | reply says the policy doesn't specify timing and asks for a preference; no false "noted" claim |
+| Streamlit to FastAPI (`AppTest`) | **8/8**: renders, photos via the authenticated endpoint, AI replies, decision update, preference line, basis badge, no percentage bar, History |
+| Local user data | database, uploaded photos and `.env` were byte-identical before and after (SHA-256) |
+
+Live checks ran on `gemini-3.5-flash-lite` because the default model's daily
+quota had not yet reset.
 
 ## Things I would do next
 

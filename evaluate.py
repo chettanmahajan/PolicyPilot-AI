@@ -1,13 +1,13 @@
 """Run the decision pipeline against labelled cases and report accuracy.
 
-    python evaluate.py                      # the supplied sample_test_cases.json
+    python evaluate.py                      # the supplied data/sample_test_cases.json
     python evaluate.py --csv                # the 214 historical tickets (generalisation)
     python evaluate.py --csv --limit 50     # a cheaper slice of them
 
 Requires GEMINI_API_KEY, since it exercises the real model.
 
 The historical CSV is used only to *score* the pipeline. Nothing in the running
-system reads it - DATA_NOTES.md is explicit that decisions must come from the
+system reads it - data/DATA_NOTES.md is explicit that decisions must come from the
 policies, not from looking up a similar past ticket.
 """
 
@@ -28,7 +28,7 @@ from src.decision import DecisionUnavailableError, generate_decision
 from src.retrieval import get_index
 from src.schemas import TicketCreate
 
-SAMPLE_CASES = PROJECT_ROOT / "sample_test_cases.json"
+SAMPLE_CASES = PROJECT_ROOT / "data" / "sample_test_cases.json"
 TICKETS_CSV = PROJECT_ROOT / "data" / "tickets.csv"
 
 

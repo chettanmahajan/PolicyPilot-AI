@@ -23,7 +23,7 @@ from src.decision import (
 from src.evidence import clean_filename, detect_image_type, validate_photo, PhotoRejectedError
 from src.retrieval import Chunk, RetrievedChunk
 from src.schemas import LLMDecision, PhotoAnalysis, TicketCreate
-from tests.conftest import STUB_ANALYSIS, STUB_DECISION, STUB_FOLLOW_UP, auth, register_and_login
+from tests.conftest import STUB_ANALYSIS, STUB_FOLLOW_UP, auth, register_and_login
 
 DAMAGED = {
     "message": "My order worth 3500 arrived damaged yesterday.",
@@ -733,6 +733,57 @@ def test_asking_about_a_refund_is_not_recorded_as_choosing_one(scripted_model):
     assert result.customer_preference == "none"
     assert "noted" not in result.reply, "must not tell the customer a choice was recorded"
     assert "refund or a replacement" in result.reply, "asks them to choose instead"
+
+
+def test_reply_claiming_an_unrecorded_preference_is_replaced_even_if_the_field_says_none(scripted_model):
+    """Regression (post-cleanup verification run): the model set customer_preference
+    to "none" but its reply still said a refund preference had been noted."""
+    from src.decision import generate_follow_up
+
+    queue, _ = scripted_model
+    queue.append(model_json(
+        customer_preference="none",
+        reply="You are eligible for a refund or a replacement, and your preference for a refund has been noted.",
+    ))
+    result = generate_follow_up(TicketCreate(**DAMAGED), APPROVED_HISTORY)  # "When do I get the refund?"
+
+    assert "noted" not in result.reply
+    assert "refund or a replacement" in result.reply
+
+
+@pytest.mark.parametrize(
+    ("reply", "claims"),
+    [
+        ("Your preference for a replacement has been noted.", {"replacement"}),
+        ("I've noted that you'd like a refund.", {"refund"}),
+        ("Please tell us whether you prefer a refund or a replacement.", set()),  # a question, not a claim
+        ("Your preference for a replacement has been noted, and you remain eligible for a refund or a replacement.",
+         {"replacement"}),  # "eligible for a refund" is not a claimed preference
+    ],
+)
+def test_claimed_preferences(reply, claims):
+    from src.decision import claimed_preferences
+
+    assert claimed_preferences(reply) == claims
+
+
+def test_reply_confirming_the_recorded_preference_is_kept(scripted_model):
+    from src.decision import generate_follow_up
+
+    queue, _ = scripted_model
+    queue.append(model_json(
+        customer_preference="replacement",
+        reply="Your preference for a replacement has been noted.",
+    ))
+    history = TicketHistory(
+        prior_decisions=(("APPROVE_REFUND_OR_REPLACEMENT", "eligible"),),
+        conversation=(("customer", "I'd prefer a replacement."),),
+        latest_message="I'd prefer a replacement.",
+    )
+    result = generate_follow_up(TicketCreate(**DAMAGED), history)
+
+    assert result.reply == "Your preference for a replacement has been noted."
+    assert result.customer_preference == "replacement"
 
 
 def test_unparseable_output_twice_is_an_error_not_a_guess(scripted_model):

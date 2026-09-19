@@ -642,14 +642,36 @@ def stated_preference(message: str, proposed: str) -> str:
     return proposed
 
 
+# "your preference for a refund", "you'd like a replacement", "your choice of a refund"
+_PREFERENCE_CLAIM_RE = re.compile(
+    r"\b(?:prefer(?:ence)?(?:\s+for)?|like|want|choice\s+of)\s+(?:a\s+)?(refund|replacement)\b",
+    re.IGNORECASE,
+)
+
+
+def claimed_preferences(reply: str) -> set[str]:
+    """Options the reply says were noted/recorded, e.g. "your preference for a refund has been noted"."""
+    claims: set[str] = set()
+    for sentence in re.split(r"(?<=[.!?])\s+", reply):
+        if _NOTED_RE.search(sentence):
+            claims |= {m.group(1).lower() for m in _PREFERENCE_CLAIM_RE.finditer(sentence)}
+    return claims
+
+
 def _finalise(result: FollowUpResult, history: TicketHistory, allowed_text: str) -> FollowUpResult:
-    """Apply the preference check, keeping the reply consistent with what was recorded."""
+    """Apply the preference check, and keep the reply consistent with what is actually recorded.
+
+    The reply is checked on its own, not only when the model's structured field
+    disagrees: a live run returned customer_preference="none" while the reply
+    text still said "your preference for a refund has been noted".
+    """
     accepted = stated_preference(history.latest_message, result.customer_preference)
-    if accepted == result.customer_preference:
-        return result
-    result = result.model_copy(update={"customer_preference": accepted})
-    if not history.preferred_resolution and _NOTED_RE.search(result.reply):
-        # The reply told the customer a choice was noted that wasn't made.
+    if accepted != result.customer_preference:
+        result = result.model_copy(update={"customer_preference": accepted})
+
+    recorded = accepted if accepted != "none" else history.preferred_resolution
+    if any(claim != recorded for claim in claimed_preferences(result.reply)):
+        # The reply tells the customer a choice was noted that isn't on record.
         result = result.model_copy(update={"reply": safe_reply(result, allowed_text, history)})
     return result
 
