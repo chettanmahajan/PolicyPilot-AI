@@ -356,6 +356,33 @@ def test_defect_evidence_request_guards_replacement():
     assert enforce_evidence_requirement(approve, history).action is Action.REQUEST_DEFECT_EVIDENCE
 
 
+@pytest.mark.parametrize(
+    "granting",
+    [
+        Action.OFFER_REPLACEMENT_OR_REFUND,  # the look-alike a live run actually produced
+        Action.APPROVE_RETURN,
+        Action.CANCEL_AND_REFUND,
+        Action.REPLACE_CORRECT_ITEM,
+    ],
+)
+def test_no_granting_action_of_any_kind_slips_past_an_evidence_request(granting):
+    """Regression: the first guard only watched the one 'paired' approval, so a
+    different remedy with an irrelevant photo would have gone straight through."""
+    history = TicketHistory(prior_decisions=ASKED_FOR_PHOTOS, photos=(evidence(relevant=False),))
+    decision = APPROVE.model_copy(update={"action": granting})
+
+    assert enforce_evidence_requirement(decision, history).action is Action.REQUEST_PHOTOS
+
+
+def test_every_action_is_described_to_the_model():
+    from src.actions import ACTION_GUIDE
+
+    assert set(ACTION_GUIDE) == set(Action), "an undescribed action would be guessed at"
+    prompt = build_prompt(TicketCreate(**DAMAGED), [])
+    assert "- APPROVE_REFUND_OR_REPLACEMENT: damaged-goods claim that is approved" in prompt
+    assert "OFFER_REPLACEMENT_OR_REFUND: undelivered order" in prompt
+
+
 def test_guardrail_leaves_non_approvals_and_unrequested_cases_alone():
     history = TicketHistory(prior_decisions=ASKED_FOR_PHOTOS, photos=(evidence(clear=False),))
     reject = APPROVE.model_copy(update={"action": Action.REJECT_OUTSIDE_WINDOW})

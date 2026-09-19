@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from pydantic import ValidationError
 
-from src.actions import Action
+from src.actions import ACTION_GUIDE, GRANTING_ACTIONS, Action
 from src.config import settings
 from src.retrieval import RetrievedChunk, get_client, get_index
 from src.schemas import LLMDecision, TicketCreate
@@ -155,18 +155,15 @@ class TicketHistory:
     def requested_evidence(self) -> Action | None:
         """The most recent evidence request made on this ticket, if any."""
         for action, _ in reversed(self.prior_decisions):
-            if action in _EVIDENCE_APPROVALS:
+            if action in _EVIDENCE_REQUESTS:
                 return Action(action)
         return None
 
 
-# Which approval each evidence request unlocks. Both pairings come straight from
-# the policies: damaged_goods.md rule 3 (photos before refund/replacement) and
-# defective_products.md rule 2 (evidence before replacement).
-_EVIDENCE_APPROVALS: dict[str, Action] = {
-    Action.REQUEST_PHOTOS.value: Action.APPROVE_REFUND_OR_REPLACEMENT,
-    Action.REQUEST_DEFECT_EVIDENCE.value: Action.APPROVE_REPLACEMENT,
-}
+# Evidence requests come straight from the policies: damaged_goods.md rule 3
+# (photos before a refund or replacement) and defective_products.md rule 2
+# (evidence before a replacement).
+_EVIDENCE_REQUESTS = frozenset({Action.REQUEST_PHOTOS.value, Action.REQUEST_DEFECT_EVIDENCE.value})
 
 
 def _describe_history(history: TicketHistory) -> str:
@@ -326,7 +323,7 @@ def _call_gemini(prompt: str, *, strict_retry: bool = False) -> str:
 def build_prompt(
     ticket: TicketCreate, context: list[RetrievedChunk], history: TicketHistory | None = None
 ) -> str:
-    allowed = ", ".join(a.value for a in Action)
+    allowed = "\n".join(f"- {action.value}: {ACTION_GUIDE[action]}" for action in Action)
     prompt = (
         f"COMPANY POLICY EXCERPTS\n{'=' * 60}\n{format_context(context)}\n\n"
         f"SUPPORT TICKET\n{'=' * 60}\n{_describe_ticket(ticket)}\n\n"
@@ -374,7 +371,15 @@ def enforce_evidence_requirement(
         return decision
 
     requested = history.requested_evidence
-    if requested is None or decision.action is not _EVIDENCE_APPROVALS[requested.value]:
+    # Any action that hands over money or goods is blocked - not just the one
+    # "matching" approval. A live test showed why: with genuine photos the model
+    # once chose OFFER_REPLACEMENT_OR_REFUND (the shipping remedy) instead of
+    # APPROVE_REFUND_OR_REPLACEMENT, and a guard keyed on one action would have
+    # waved that through even for an irrelevant photo.
+    # ponytail: also blocks a legitimate topic change (e.g. "actually it was the
+    # wrong flavour") until evidence arrives; open a new ticket for that, or
+    # track which claim each request belongs to if it becomes common.
+    if requested is None or decision.action not in GRANTING_ACTIONS:
         return decision
     if any(photo.usable for photo in history.photos):
         return decision

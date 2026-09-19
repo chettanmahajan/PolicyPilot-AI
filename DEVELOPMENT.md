@@ -191,6 +191,12 @@ inspect first, present a plan, then build.
 | 12 | **The order value silently defaulted to ₹1,000.** Its checkbox started ticked with 1000 pre-filled, so a message saying "₹3,500" was overridden and the ticket was wrongly approved. | Tickets 3 and 4 had identical messages but different decisions; the stored fields showed 1000 vs 3500. | Same fix as #11. The prompt now also says: if the words contradict a field, ask - don't pick one. |
 | 13 | `use_container_width` is deprecated in the installed Streamlit (removal date already passed), including in the original code. | Warnings in the UI test run. | Replaced all 7 uses with `width="stretch"`. |
 | 14 | A test stub for `select_context` accepted one argument; retrieval now also takes follow-up text. 5 tests failed. | Running the existing suite straight after the change. | Updated the stub's signature; no assertion changed. |
+| 15 | **With genuine damage photos, the model approved using the wrong action**: `OFFER_REPLACEMENT_OR_REFUND` (the *shipping-delay* remedy) instead of `APPROVE_REFUND_OR_REPLACEMENT`. Root cause, which predates this feature: the prompt listed the 15 actions as bare names, two of them near-synonyms. | Live test with your real photos (broken mug, crushed box). All 90 tests were passing at the time. | Each action is now described to the model by the situation it belongs to, taken from `tickets.csv`, where every action occurs with exactly one `issue_type`. No thresholds were added. Re-run live: `APPROVE_REFUND_OR_REPLACEMENT`. |
+| 16 | **The guardrail had a hole.** It blocked only the one "paired" approval, so bug #15's look-alike action would have slipped through **even with an irrelevant photo**. | Same live run: the wrong action went straight past the guard. | The guard now blocks every action that grants money or goods (`GRANTING_ACTIONS`). A regression test covers the exact action that slipped through, and reverting the fix makes 4 tests fail. |
+
+Bugs 15 and 16 are the reason the real-photo test mattered. The mocked suite
+could not have found either of them: it is only as good as the assumptions in
+its stubs, and the stubs used the "correct" action.
 
 ### Were the new tests actually testing anything?
 
@@ -207,7 +213,9 @@ Both files were restored and diffed byte-for-byte against backups.
 
 | What | Result |
 |---|---|
-| Automated suite | **90 passed** (61 existing + 29 new), offline |
+| Automated suite | **95 passed** (61 existing + 34 new), offline |
+| Live: **your real photos** (broken red mug; crushed box), reported 1 day after delivery | Vision: *"A red ceramic mug is broken into pieces inside a cardboard shipping box, surrounded by air-filled protective packaging"*; both photos clear / relevant / shows issue. The Getty watermark was ignored. Decision: `REQUEST_PHOTOS` → **`APPROVE_REFUND_OR_REPLACEMENT`** (after fix #15) |
+| Live: the same real photos, reported **10 days** after delivery | `REJECT_OUTSIDE_WINDOW` → `REJECT_OUTSIDE_WINDOW`: a genuine photo did **not** override the 7-day window. *Run before fix #15; that fix only adds action descriptions, and this ticket never reached a granting action.* |
 | Live: ₹3,500 damaged mug ticket | `REQUEST_PHOTOS`, cites `damaged_goods.md` rule 3 |
 | Live: upload a black-and-white **checkerboard** as "the broken mug" | Vision: *"a black and white checkerboard pattern. No coffee mug or packaging is visible"* → `is_relevant=false, shows_issue=false`. Decision stayed `REQUEST_PHOTOS`, asking for a clear photo of the mug and packaging. **Not approved.** Same ticket, both decisions kept. |
 | Live: storage | One file on disk, 32-hex-char random name; API response contains no stored name or path; owner download byte-identical, `nosniff` set |
@@ -225,9 +233,13 @@ that process only. The project default is unchanged. Re-running
 `python evaluate.py` on `gemini-3.5-flash` after the quota resets is still
 outstanding.
 
-**Not verified by me:** a real photo of genuine damage leading to
-`APPROVE_REFUND_OR_REPLACEMENT`. That needs a real damaged-product photo; it is
-a manual check in the app (see DEMO.md).
+The genuine-photo scenarios above also ran on `gemini-3.1-flash-lite`, for the
+same quota reason.
+
+**Not verified by me:** the photo upload *through the Streamlit widget*.
+Streamlit's test harness cannot drive `file_uploader`, so the upload was
+verified at the API level (automated and live) and the rest of the UI with
+`AppTest`. Clicking **Submit Photos** in a real browser is a manual check.
 
 ## Things I would do next
 

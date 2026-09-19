@@ -57,7 +57,7 @@ The frontend never touches the database and never makes a policy judgement of it
 │   └── evidence.py     photo validation, private storage, vision analysis
 ├── streamlit_app.py    frontend (Login/Register, New Decision, History)
 ├── evaluate.py         accuracy runner over labelled cases
-├── tests/              90 automated tests, no API key required
+├── tests/              95 automated tests, no API key required
 ├── uploads/            private photo storage (created on first upload, gitignored)
 ├── knowledge_base/     the 6 supplied policy documents
 ├── data/tickets.csv    214 historical tickets (used for evaluation only)
@@ -252,14 +252,15 @@ REQUEST_PHOTOS ──▶ customer uploads photos (+ optional note)
    ③ Gemini call B: reassess with the original complaint + fields,
         every follow-up, every photo description, earlier decisions,
         and freshly retrieved policies
-   ④ guardrail: no approval after an evidence request unless at least
+   ④ guardrail: no refund, replacement or return of ANY kind after an
+        evidence request unless at least
         one photo is clear AND relevant AND shows the problem
    ⑤ only now write files + rows, all or nothing
 ```
 
 **Why two calls.** The decision model never sees the raw image. It reasons over a neutral written description of what is visible. That makes the evidence auditable, since the description is stored and shown to the user. It is also the main defence against "a photo exists, so approve".
 
-**Why a guardrail in code.** `damaged_goods.md` rule 3 says photographs must be requested *before* a refund or replacement is approved, and `defective_products.md` rule 2 says the same for defect evidence. The prompt already tells the model this. `enforce_evidence_requirement()` makes it deterministic: an approval after an evidence request is turned back into the request unless a usable photo exists. It adds no new policy. It only makes sure the existing rule is enforced.
+**Why a guardrail in code.** `damaged_goods.md` rule 3 says photographs must be requested *before* a refund or replacement is approved, and `defective_products.md` rule 2 says the same for defect evidence. The prompt already tells the model this. `enforce_evidence_requirement()` makes it deterministic: after an evidence request, **any** action that grants money or goods is turned back into the request unless a usable photo exists. It covers every granting action, not just the "matching" approval, because a live test showed the model can pick a look-alike remedy (see DEVELOPMENT.md, bugs 15–16). It adds no new policy. It only makes sure the existing rule is enforced.
 
 **Secure storage.**
 - Files are saved as `uploads/{uuid4}.{jpg|png|webp}`. The customer's filename is only display metadata; it never reaches a filesystem path, and path components such as `../../` are stripped.
@@ -277,7 +278,7 @@ Follow-up messages can also fill in facts missing from the original form ("it wa
 python -m pytest tests/ -v
 ```
 
-**90 tests, fully automated, no API key needed** — every Gemini call (decisions *and* photo analysis) is stubbed, uploads go to a per-test temporary folder, and an autouse fixture fails the test if anything tries to construct a real client.
+**95 tests, fully automated, no API key needed** — every Gemini call (decisions *and* photo analysis) is stubbed, uploads go to a per-test temporary folder, and an autouse fixture fails the test if anything tries to construct a real client.
 
 | File | Covers |
 |---|---|
