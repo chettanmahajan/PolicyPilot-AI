@@ -43,6 +43,11 @@ class Ticket(Base):
     opened_status: Mapped[str | None] = mapped_column(String(32))
     order_status: Mapped[str | None] = mapped_column(String(32))
 
+    # "refund" / "replacement" - what the customer said they want when the
+    # decision offers either. A recorded preference, never a completed action:
+    # nothing in this system issues refunds or ships replacements.
+    preferred_resolution: Mapped[str | None] = mapped_column(String(16))
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
 
     user: Mapped[User] = relationship(back_populates="tickets")
@@ -66,7 +71,7 @@ class Ticket(Base):
 
 
 class TicketMessage(Base):
-    """A customer follow-up on an existing ticket (answers, extra details)."""
+    """One turn of the ticket conversation: a customer follow-up or the AI's reply."""
 
     __tablename__ = "ticket_messages"
 
@@ -74,6 +79,7 @@ class TicketMessage(Base):
     ticket_id: Mapped[int] = mapped_column(
         ForeignKey("tickets.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    role: Mapped[str] = mapped_column(String(16), nullable=False, default="customer")  # customer | assistant
     body: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
 
@@ -120,8 +126,13 @@ class Decision(Base):
     )
     action: Mapped[str] = mapped_column(String(64), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)  # model self-rating, uncalibrated
     sources: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+
+    # How much weight the decision can bear, from explicit rules rather than the
+    # model's number - see decision.decision_basis().
+    basis: Mapped[str] = mapped_column(String(24), nullable=False, default="clear")
+    basis_reasons: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
 
     ticket: Mapped[Ticket] = relationship(back_populates="decisions")

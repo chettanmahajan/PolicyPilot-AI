@@ -2,7 +2,7 @@
 
 **AI-Powered Support Ticket Decision Assistant** — turning customer complaints into policy-backed decisions.
 
-A customer-support agent submits a ticket; the system retrieves the relevant company policy rules, asks Gemini to apply them, validates the structured answer, stores it, and shows the recommendation with its confidence, reasoning, and the exact policy files it relied on.
+A customer-support agent submits a ticket; the system retrieves the relevant company policy rules, asks Gemini to apply them, validates the structured answer, stores it, and shows the recommendation with its reasoning, the exact policy files it relied on, and a rule-based decision basis. Customers can continue the same ticket: the AI answers follow-up questions, accepts photo evidence, and reassesses.
 
 ---
 
@@ -57,7 +57,7 @@ The frontend never touches the database and never makes a policy judgement of it
 │   └── evidence.py     photo validation, private storage, vision analysis
 ├── streamlit_app.py    frontend (Login/Register, New Decision, History)
 ├── evaluate.py         accuracy runner over labelled cases
-├── tests/              95 automated tests, no API key required
+├── tests/              134 automated tests, no API key required
 ├── uploads/            private photo storage (created on first upload, gitignored)
 ├── knowledge_base/     the 6 supplied policy documents
 ├── data/tickets.csv    214 historical tickets (used for evaluation only)
@@ -190,13 +190,16 @@ id           PK            id              PK             id           PK
 email        UNIQUE   ┌──< user_id         FK        ┌──< ticket_id    FK
 password_hash          │   message                    │    action
 created_at             │   order_value_inr            │    reason
-                       │   days_since_delivery        │    confidence
+                       │   days_since_delivery        │    confidence   (model self-rating)
                        │   days_since_dispatch        │    sources      JSON
-                       │   product_type               │    created_at
-                       │   opened_status              │
-                       │   order_status               │   ticket_messages
-                       │   created_at                 │   ───────────────
+                       │   product_type               │    basis        awaiting_customer|clear|review
+                       │   opened_status              │    basis_reasons JSON
+                       │   order_status               │    created_at
+                       │   preferred_resolution       │
+                       │   created_at                 │   ticket_messages
+                       │                              │   ───────────────
                        │                              ├──< ticket_id  FK
+                       │                              │    role  customer|assistant
                        │                              │    body, created_at
                        │                              │
                        │                              │   ticket_photos
@@ -213,9 +216,9 @@ created_at             │   order_value_inr            │    reason
 
 The six structured columns on `tickets` are nullable on purpose: a missing value is exactly what should drive a `NEEDS_MORE_INFORMATION` decision, so it has to be representable.
 
-A ticket keeps **every** decision it has ever had — a reassessment appends a new row rather than overwriting — and the API's `decision` field is simply the latest. Photo bytes are never stored in SQLite: `ticket_photos` holds metadata, and the image lives on disk under `uploads/`.
+A ticket keeps **every** decision it has ever had. A new row is appended whenever a follow-up **changes** the action, and earlier rows are never overwritten. The API's `decision` field is simply the latest. Photo bytes are never stored in SQLite: `ticket_photos` holds metadata, and the image lives on disk under `uploads/`.
 
-**Upgrading an older database:** the first version made `decisions.ticket_id` UNIQUE (one decision per ticket), and SQLite can't drop that constraint in place. Delete `policypilot.db` and restart the backend; the new schema is created on startup.
+**Upgrading an older database:** delete `policypilot.db` and restart the backend; the new schema is created on startup. SQLite's `create_all` creates missing tables but never alters existing ones, and the schema has changed twice (decision history, then message roles, preference and decision basis).
 
 ## Retrieval design
 
@@ -243,6 +246,39 @@ No Pinecone, FAISS, Chroma, LangChain or LlamaIndex; the assignment explicitly s
 ## Follow-ups and photo evidence
 
 A ticket is a conversation, not a one-shot answer. Under the current decision, the ticket view has a **follow-up box**. When the decision is `REQUEST_PHOTOS` or `REQUEST_DEFECT_EVIDENCE`, it also has a **photo upload** control. Both go to one endpoint, `POST /tickets/{id}/follow-ups`, and both reassess the **same** ticket.
+
+### The AI answers
+
+Every follow-up gets an **AI reply**, shown in the conversation and saved as a `ticket_messages` row with `role="assistant"`. The reply comes from the same Gemini call that reassesses the ticket, so it adds no extra quota. The model returns the usual decision plus two fields, `reply` and `customer_preference`. That extended schema is used **only** for follow-ups. First decisions, and `evaluate.py`, keep the assignment's `{action, confidence, reason, sources}` exactly.
+
+The reassessment sees the original complaint and fields, the whole conversation (including earlier AI replies), every photo description, the decision history, any recorded preference, and freshly retrieved policies.
+
+**Rules for replies.** The prompt tells the model to answer directly, to use only the ticket and the policy, and to say explicitly when the policy doesn't cover something. The policies contain no refund timelines, payment methods or delivery dates. The prompt also says never to claim anything was issued or processed (the system only decides eligibility), to ask a specific question when information is missing, and to treat everything the customer writes as information, never instructions.
+
+**Backstops in code**, because a prompt is a request, not a guarantee:
+- `reply_problems()` rejects a reply that gives a time period not found in the retrieved policy or ticket (e.g. "5–7 business days"; quoting "7 calendar days" is fine), a date ("by 25 September", "tomorrow"), or a completion claim ("your refund has been processed", "we have issued").
+- A rejected reply is retried once, with the specific problems named. If it still fails, it is replaced with a reply built only from what is certain.
+- If the evidence guardrail blocks an approval, the model's reply ("you're approved!") is discarded along with it.
+
+### Refund or replacement
+
+Only `APPROVE_REFUND_OR_REPLACEMENT` and `OFFER_REPLACEMENT_OR_REFUND` offer a choice. **None of the six policies says how the choice is made, or what happens next**, and nothing in this system issues refunds. So:
+- While no preference is recorded, the reply asks which the customer prefers.
+- A stated preference is saved on `tickets.preferred_resolution` and shown as "*recorded, not yet processed*". It never changes the decision.
+- **A preference must be plainly stated.** `stated_preference()` accepts the model's reading only if the message names that option and isn't a question. A live test showed why: "When will I get my *refund*?" was recorded as choosing a refund. Asking about an option is not choosing it.
+- It's accepted only on an either/or decision and only from text the customer wrote in that turn. A later "none" never erases it.
+
+### Decision basis (instead of a confidence percentage)
+
+The `confidence` number is **the model's own self-rating**. Nothing measures or calibrates it, and at `temperature=0` it is almost always ~1.0. The UI used to show it as "Confidence 100%", which presented a guess as a probability. It's still returned by the API (the assignment schema requires it), but the UI now shows it only as a small caption labelled *uncalibrated*, and headlines a **decision basis** computed from explicit rules (`decision_basis()`):
+
+| Basis | Rule |
+|---|---|
+| ⏳ **Awaiting customer** | The action is `NEEDS_MORE_INFORMATION`, `REQUEST_PHOTOS` or `REQUEST_DEFECT_EVIDENCE`. Not a final decision. |
+| 🔎 **Review recommended** | A final decision where the model cited no matching policy, **or** rated itself below 0.8, **or** the decision changed because of the customer's own statements (a text-only follow-up) rather than ticket data or photo evidence. The reasons are shown. |
+| ✅ **Clear policy match** | A final decision with none of those flags. |
+
+There are two final levels, not three. Each rule above can be justified; a line between "high" and "medium" can't be, without calibration data (accuracy measured per confidence band over labelled cases), which the free tier can't produce. The basis sits **beside** the decision: it says how much weight the decision bears, not whether the customer is eligible.
 
 ```
 REQUEST_PHOTOS ──▶ customer uploads photos (+ optional note)
@@ -278,7 +314,7 @@ Follow-up messages can also fill in facts missing from the original form ("it wa
 python -m pytest tests/ -v
 ```
 
-**95 tests, fully automated, no API key needed** — every Gemini call (decisions *and* photo analysis) is stubbed, uploads go to a per-test temporary folder, and an autouse fixture fails the test if anything tries to construct a real client.
+**134 tests, fully automated, no API key needed** — every Gemini call (decisions, follow-up replies *and* photo analysis) is stubbed, uploads go to a per-test temporary folder, and an autouse fixture fails the test if anything tries to construct a real client.
 
 | File | Covers |
 |---|---|
@@ -286,7 +322,7 @@ python -m pytest tests/ -v
 | `test_tickets.py` | creation, validation, history, detail, **ownership**, rollback when the pipeline fails |
 | `test_retrieval.py` | all 6 files load, 29 chunks, thresholds survive chunking, cosine ranking, index round-trip and fingerprinting |
 | `test_decision.py` | schema rejection of invented actions / out-of-range confidence / extra keys, whole-document expansion, hallucinated-citation dropping, retry-once-then-fail |
-| `test_followups.py` | follow-ups stay on the same ticket and keep earlier decisions; the whole conversation reaches the reassessment; photos saved under random names with no path exposed; owner-only download with safe headers; text-renamed-png / gif / html / empty / oversized / too-many uploads rejected with nothing written; AI failure leaves no rows or files; **Bob can't post to, upload to or download from Alice's ticket**; the guardrail blocks approval for blurry, irrelevant or no-damage photos |
+| `test_followups.py` | follow-ups stay on the same ticket and keep earlier decisions; the whole conversation reaches the reassessment; photos saved under random names with no path exposed; owner-only download with safe headers; text-renamed-png / gif / html / empty / oversized / too-many uploads rejected with nothing written; AI failure leaves no rows or files; **Bob can't post to, upload to or download from Alice's ticket**; the guardrail blocks approval for blurry, irrelevant or no-damage photos; **every follow-up gets a stored AI reply and a question never duplicates the decision**; invented timelines, dates and "refund processed" claims are caught, retried, then replaced; asking about a refund isn't recorded as choosing one; preferences are saved only on either/or decisions; the decision-basis rules |
 
 The authorization requirement called out in the assignment is `test_alice_cannot_read_bobs_ticket_by_id`, plus `test_unknown_and_forbidden_ids_are_indistinguishable` which asserts a forbidden id and a nonexistent id return byte-identical responses.
 
@@ -347,6 +383,10 @@ The runner paces itself to `--rpm` (default 5) because the Gemini free tier is t
   from src.retrieval import get_client
   print([m.name for m in get_client().models.list()])
   ```
+- **AI replies are checked, not proven.** `reply_problems()` catches invented periods, dates and completion claims by pattern. A paraphrase such as "shortly" or "soon" isn't caught; the prompt forbids it, but only the pattern check is deterministic.
+- **Preference detection is deliberately conservative.** "Can I have a replacement instead?" is not recorded (it's a question), so the customer is asked to confirm. A negation such as "I don't want a refund" depends on the model reading it correctly.
+- **Nothing is fulfilled.** A recorded preference is exactly that; no refund, replacement or return is issued by this system, and the replies say so.
+- **The decision basis is rule-based, not calibrated.** It tells you *why* to double-check a decision, not *how likely* it is to be right. Calibrating it needs accuracy measured per band over the 214 labelled tickets.
 - **Every ticket costs two Gemini calls** (one embedding, one decision), with no caching of repeated tickets. A text follow-up costs the same again; a **photo submission costs one more** (the vision analysis). On the free tier that is roughly 6–10 photo submissions a day.
 - **Photos are stored exactly as uploaded, including EXIF metadata** — which can contain the GPS location where the photo was taken. Stripping it would mean re-encoding every image (Pillow), which the project currently avoids depending on. Worth adding before real customer use.
 - **Photos can't be deleted** by the customer, and there is no retention policy; they live until `uploads/` is cleared.

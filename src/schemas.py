@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, PrivateAttr, field_validator
 
 from src.actions import Action
 
@@ -62,9 +62,11 @@ class DecisionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     action: Action
-    confidence: float = Field(ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)  # the model's self-rating; not a probability
     reason: str
     sources: list[str]
+    basis: str = "clear"  # awaiting_customer | clear | review
+    basis_reasons: list[str] = Field(default_factory=list)
     created_at: datetime
 
 
@@ -84,6 +86,7 @@ class MessageOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    role: Literal["customer", "assistant"]
     body: str
     created_at: datetime
 
@@ -116,6 +119,7 @@ class TicketOut(BaseModel):
     product_type: str | None
     opened_status: str | None
     order_status: str | None
+    preferred_resolution: str | None = None  # recorded preference, not a completed action
     created_at: datetime
     decision: DecisionOut | None = None  # the current (latest) decision
     decisions: list[DecisionOut] = Field(default_factory=list)  # full history, oldest first
@@ -147,3 +151,19 @@ class LLMDecision(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     reason: str = Field(min_length=1, max_length=2000)
     sources: list[str] = Field(default_factory=list)
+
+    # Set by grounding when the model cited no usable policy and the sources
+    # were filled in from what it was shown. Private: never part of the JSON
+    # the model sees or the API returns - it only feeds decision_basis().
+    _sources_filled_in: bool = PrivateAttr(default=False)
+
+
+class FollowUpResult(LLMDecision):
+    """A reassessment on a continuing ticket: the decision plus a reply to the customer.
+
+    Only follow-ups use this; the first decision on a ticket (and evaluate.py)
+    still uses plain LLMDecision, so the assignment's output schema is unchanged.
+    """
+
+    reply: str = Field(min_length=1, max_length=2000)
+    customer_preference: Literal["refund", "replacement", "none"] = "none"

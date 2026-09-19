@@ -20,13 +20,22 @@ from src.actions import Action  # noqa: E402
 from src.api import app  # noqa: E402
 from src.config import settings  # noqa: E402
 from src.database import Base, get_db  # noqa: E402
-from src.schemas import LLMDecision, PhotoAnalysis  # noqa: E402
+from src.schemas import FollowUpResult, LLMDecision, PhotoAnalysis  # noqa: E402
 
 STUB_DECISION = LLMDecision(
     action=Action.REQUEST_PHOTOS,
     confidence=0.91,
     reason="Stubbed decision used by the automated tests.",
     sources=["damaged_goods.md"],
+)
+
+STUB_FOLLOW_UP = FollowUpResult(
+    action=Action.REQUEST_PHOTOS,  # same as STUB_DECISION: an unchanged decision by default
+    confidence=0.91,
+    reason="Stubbed reassessment used by the automated tests.",
+    sources=["damaged_goods.md"],
+    reply="Stubbed reply to the customer.",
+    customer_preference="none",
 )
 
 STUB_ANALYSIS = PhotoAnalysis(
@@ -91,6 +100,7 @@ def client(db_session, monkeypatch, tmp_path):
     Uploads go to a per-test temporary folder, never the real uploads/ dir.
     """
     monkeypatch.setattr("src.api.generate_decision", lambda ticket, history=None: STUB_DECISION)
+    monkeypatch.setattr("src.api.generate_follow_up", lambda ticket, history: STUB_FOLLOW_UP)
     monkeypatch.setattr(
         "src.api.analyze_photos",
         lambda photos, complaint: [STUB_ANALYSIS for _ in photos],

@@ -114,15 +114,24 @@ def render_decision(decision: dict[str, Any] | None) -> None:
 
     st.subheader(decision["action"].replace("_", " ").title())
 
-    confidence = float(decision["confidence"])
-    left, right = st.columns([3, 1])
-    left.progress(confidence, text=f"Confidence {confidence:.0%}")
-    if decision["action"] == "NEEDS_MORE_INFORMATION":
-        right.info("More info")
-    elif confidence >= 0.75:
-        right.success("High")
+    # "Decision basis" replaces a confidence percentage: the model's number is
+    # an uncalibrated self-rating (it is ~1.0 almost every time), so showing it
+    # as "100%" presented a guess as a probability. The basis comes from
+    # explicit rules in decision.decision_basis(), and is shown beside the
+    # decision - it says how much weight the decision bears, not whether the
+    # customer is eligible.
+    basis = decision.get("basis", "clear")
+    reasons = decision.get("basis_reasons") or []
+    if basis == "awaiting_customer":
+        st.info("⏳ **Awaiting customer** — not a final decision yet.")
+    elif basis == "review":
+        st.warning("🔎 **Review recommended** — " + " ".join(reasons))
     else:
-        right.warning("Low")
+        st.success("✅ **Clear policy match** — a cited policy rule applies and no review flags were raised.")
+    st.caption(
+        f"Model self-rating: {float(decision['confidence']):.2f} "
+        "(uncalibrated — not a probability, and not part of the eligibility decision)"
+    )
 
     st.markdown("**Reason**")
     st.write(decision["reason"])
@@ -138,6 +147,8 @@ def render_decision(decision: dict[str, Any] | None) -> None:
 # --------------------------------------------------------------------------
 # Ticket view: conversation, evidence, follow-ups (used by both tabs)
 # --------------------------------------------------------------------------
+
+EITHER_OR = {"APPROVE_REFUND_OR_REPLACEMENT", "OFFER_REPLACEMENT_OR_REFUND"}
 
 EVIDENCE_REQUESTS = {
     "REQUEST_PHOTOS": "clear photos of the damaged product **and** its packaging",
@@ -173,20 +184,26 @@ def _flag(ok: bool, label: str) -> str:
 
 
 def render_timeline(detail: dict[str, Any]) -> None:
-    """Every earlier decision, follow-up and photo on the ticket, oldest first."""
-    rank = {"message": 0, "photo": 1, "decision": 2}  # order within one follow-up
+    """Every message, photo and decision change on the ticket, oldest first."""
+    # Order within one follow-up: customer message, photos, decision change, AI reply.
+    rank = {"customer": 0, "photo": 1, "decision": 2, "assistant": 3}
     events = (
-        [("message", m) for m in detail["messages"]]
+        [(m["role"], m) for m in detail["messages"]]
         + [("photo", p) for p in detail["photos"]]
-        + [("decision", d) for d in detail["decisions"][:-1]]  # the latest is shown in full below
+        + [("decision", d) for d in detail["decisions"]]
     )
     events.sort(key=lambda e: (datetime.fromisoformat(e[1]["created_at"]), rank[e[0]]))
 
     st.markdown("**Conversation**")
+    first_decision = detail["decisions"][0]["created_at"] if detail["decisions"] else None
     for kind, item in events:
-        if kind == "message":
+        if kind == "customer":
             st.markdown(f"🗨️ **Customer** · {_when(item['created_at'])}")
             st.write(item["body"])
+        elif kind == "assistant":
+            with st.container(border=True):
+                st.markdown(f"🤖 **PolicyPilot** · {_when(item['created_at'])}")
+                st.write(item["body"])
         elif kind == "photo":
             data = _photo_bytes(st.session_state["token"], detail["id"], item["id"])
             left, right = st.columns([1, 2])
@@ -206,8 +223,9 @@ def render_timeline(detail: dict[str, Any]) -> None:
             )
             right.write(item["analysis"])
         else:
+            label = "Initial decision" if item["created_at"] == first_decision else "Decision updated"
             st.markdown(
-                f"🤖 **Decision** · {_when(item['created_at'])} · "
+                f"📋 **{label}** · {_when(item['created_at'])} · "
                 f"`{item['action']}` — {item['reason']}"
             )
 
@@ -268,6 +286,16 @@ def render_ticket(detail: dict[str, Any], key_prefix: str) -> None:
     decision = detail.get("decision")
     render_decision(decision)
 
+    if decision and decision["action"] in EITHER_OR:
+        preference = detail.get("preferred_resolution")
+        if preference:
+            st.markdown(
+                f"**Customer preference:** {preference.title()} — recorded, not yet processed. "
+                "The policy doesn't describe processing times or next steps."
+            )
+        else:
+            st.caption("Eligible for a refund or a replacement. Tell us below which you'd prefer.")
+
     # Photo upload appears only when the policy is actually asking for evidence.
     needed = EVIDENCE_REQUESTS.get(decision["action"]) if decision else None
     if needed:
@@ -288,8 +316,8 @@ def render_ticket(detail: dict[str, Any], key_prefix: str) -> None:
 
     with st.form(f"{key}-follow-up", clear_on_submit=True):
         text = st.text_area(
-            "Add information or answer the question above",
-            placeholder="e.g. It was delivered 2 days ago and the handle is snapped off.",
+            "Ask a question, answer the one above, or add information",
+            placeholder="e.g. When will I get my refund?  ·  I'd prefer a replacement.  ·  It was delivered 2 days ago.",
             height=90,
             key=f"{key}-text",
         )

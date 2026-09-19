@@ -22,8 +22,11 @@ from src.database import init_db
 from src.decision import (
     DecisionUnavailableError,
     PhotoEvidence,
+    EITHER_OR_ACTIONS,
     TicketHistory,
+    decision_basis,
     generate_decision,
+    generate_follow_up,
 )
 from src.evidence import (
     PhotoRejectedError,
@@ -169,12 +172,17 @@ def _owned_ticket(db: Session, ticket_id: int, user: User) -> Ticket:
     return ticket
 
 
-def _decision_row(result: LLMDecision, created_at: datetime | None = None) -> Decision:
+def _decision_row(
+    result: LLMDecision, created_at: datetime | None = None, *, changed_by_statement: bool = False
+) -> Decision:
+    basis, basis_reasons = decision_basis(result, changed_by_statement=changed_by_statement)
     row = Decision(
         action=result.action.value,
         confidence=result.confidence,
         reason=result.reason,
         sources=result.sources,
+        basis=basis,
+        basis_reasons=basis_reasons,
     )
     if created_at is not None:
         row.created_at = created_at
@@ -238,16 +246,20 @@ def add_follow_up(
     except PhotoRejectedError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from None
 
-    follow_ups = [m.body for m in ticket.messages] + ([text] if text else [])
+    conversation = [(m.role, m.body) for m in ticket.messages] + ([("customer", text)] if text else [])
+    customer_said = [body for role, body in conversation if role == "customer"]
     try:
         analyses = (
-            analyze_photos(validated, complaint="\n".join([ticket.message, *follow_ups]))
+            analyze_photos(validated, complaint="\n".join([ticket.message, *customer_said]))
             if validated
             else []
         )
         history = TicketHistory(
             prior_decisions=tuple((d.action, d.reason) for d in ticket.decisions),
-            follow_ups=tuple(follow_ups),
+            conversation=tuple(conversation),
+            latest_message=text,
+            new_photos=len(validated),
+            preferred_resolution=ticket.preferred_resolution,
             photos=tuple(
                 [
                     PhotoEvidence(p.original_filename, p.analysis, p.is_clear, p.is_relevant, p.shows_issue)
@@ -259,7 +271,7 @@ def add_follow_up(
                 ]
             ),
         )
-        result = generate_decision(_ticket_facts(ticket), history)
+        result = generate_follow_up(_ticket_facts(ticket), history)
     except DecisionUnavailableError as exc:
         logger.exception("reassessment failed")
         raise HTTPException(
@@ -268,12 +280,15 @@ def add_follow_up(
         ) from exc
 
     # One timestamp for everything in this follow-up, so the conversation reads
-    # message -> photos -> decision regardless of insert order.
+    # customer message -> photos -> decision change -> AI reply regardless of
+    # insert order (the UI orders same-timestamp items by kind).
     now = datetime.now(UTC)
+    current = ticket.decision
+    action_changed = current is None or result.action.value != current.action
     stored: list[str] = []
     try:
         if text:
-            ticket.messages.append(TicketMessage(body=text, created_at=now))
+            ticket.messages.append(TicketMessage(role="customer", body=text, created_at=now))
         for photo, analysis in zip(validated, analyses, strict=True):
             stored_name = save_photo(photo)
             stored.append(stored_name)
@@ -291,7 +306,25 @@ def add_follow_up(
                     created_at=now,
                 )
             )
-        ticket.decisions.append(_decision_row(result, created_at=now))
+        # A decision row is added only when the action actually changes. A
+        # question ("when is my refund?") gets a reply, not a duplicate decision.
+        if action_changed:
+            ticket.decisions.append(
+                # A change on a text-only turn rests on the customer's own
+                # statements rather than ticket data or photo evidence.
+                _decision_row(result, created_at=now, changed_by_statement=not validated)
+            )
+        ticket.messages.append(TicketMessage(role="assistant", body=result.reply, created_at=now))
+
+        # Record a stated preference only where the decision actually offers
+        # a choice, and only from something the customer wrote this turn.
+        # "none" never erases an earlier preference.
+        if (
+            text
+            and result.action in EITHER_OR_ACTIONS
+            and result.customer_preference in ("refund", "replacement")
+        ):
+            ticket.preferred_resolution = result.customer_preference
         db.commit()
     except Exception:
         db.rollback()
