@@ -37,3 +37,6 @@ uploads/
 /*.jpeg
 /*.png
 /*.webp
+
+# Raw screenshot captures - only the curated ones in assets/screenshots/ are published
+/Screenshots/

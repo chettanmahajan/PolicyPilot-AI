@@ -19,7 +19,7 @@ from pydantic import ValidationError
 
 from src.actions import ACTION_GUIDE, GRANTING_ACTIONS, Action
 from src.config import settings
-from src.retrieval import RetrievedChunk, get_client, get_index
+from src.retrieval import EmbeddingError, RetrievedChunk, get_client, get_index
 from src.schemas import FollowUpResult, LLMDecision, TicketCreate
 
 logger = logging.getLogger(__name__)
@@ -241,13 +241,20 @@ def select_context(ticket: TicketCreate, extra_query: str = "") -> list[Retrieve
     is judged relevant we include all of its rules. This avoids the common
     failure where the top-k cuts off the exception that changes the answer.
     """
-    index = get_index()
     query = build_retrieval_query(ticket)
     if extra_query:
         # Follow-ups can move the conversation onto a different policy (e.g.
         # "actually it was the wrong flavour"), so they steer retrieval too.
         query = f"{query}. {extra_query}"
-    ranked = index.search(query)
+
+    # Both steps embed: building/loading the index, and embedding the query.
+    # Either can fail on a bad key or an outage, and both get the same
+    # treatment as a failed decision call - a clear 503, not a bare 500.
+    try:
+        index = get_index()
+        ranked = index.search(query)
+    except EmbeddingError as exc:
+        raise DecisionUnavailableError(str(exc)) from exc
 
     relevant_sources = {r.chunk.source for r in ranked}
     best_score = {r.chunk.source: r.score for r in ranked}

@@ -124,6 +124,10 @@ def get_client():
         return _make_client()
 
 
+class EmbeddingError(RuntimeError):
+    """The embedding call failed, so retrieval cannot run."""
+
+
 def embed(texts: list[str], *, task_type: str) -> np.ndarray:
     """Embed texts and return L2-normalised row vectors.
 
@@ -131,11 +135,22 @@ def embed(texts: list[str], *, task_type: str) -> np.ndarray:
     """
     from google.genai import types
 
-    response = get_client().models.embed_content(
-        model=settings.embedding_model,
-        contents=texts,
-        config=types.EmbedContentConfig(task_type=task_type),
-    )
+    try:
+        response = get_client().models.embed_content(
+            model=settings.embedding_model,
+            contents=texts,
+            config=types.EmbedContentConfig(task_type=task_type),
+        )
+    except Exception as exc:  # noqa: BLE001 - any SDK/transport failure, reported uniformly
+        detail = str(exc)
+        hint = ""
+        if "401" in detail or "UNAUTHENTICATED" in detail or "API key not valid" in detail:
+            # A bare 500 tells the user nothing; name the likely cause.
+            hint = (
+                " Check GEMINI_API_KEY in .env: an API key from Google AI Studio starts "
+                "with 'AIza' and does not expire, while a short-lived token does."
+            )
+        raise EmbeddingError(f"Embedding request failed: {detail}{hint}") from exc
     vectors = np.array([e.values for e in response.embeddings], dtype=np.float32)
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     return vectors / np.maximum(norms, 1e-12)

@@ -120,6 +120,32 @@ def test_search_returns_at_most_top_k(fake_embed):
 # --------------------------------------------------------------------------
 
 
+def test_embedding_failure_becomes_a_clear_error_not_a_crash(monkeypatch):
+    """A rejected API key used to surface as a bare 500 Internal Server Error."""
+    from google.genai import errors
+
+    from src.decision import DecisionUnavailableError, select_context
+    from src.retrieval import EmbeddingError
+    from src.schemas import TicketCreate
+
+    class FakeModels:
+        def embed_content(self, **kwargs):
+            raise errors.ClientError(
+                401, {"error": {"code": 401, "status": "UNAUTHENTICATED"}}, None
+            )
+
+    monkeypatch.setattr(retrieval, "get_client", lambda: type("C", (), {"models": FakeModels()})())
+
+    with pytest.raises(EmbeddingError) as raised:
+        retrieval.embed(["x"], task_type="RETRIEVAL_QUERY")
+    assert "GEMINI_API_KEY" in str(raised.value), "the message must name the likely cause"
+
+    # And through the decision engine it becomes the same error the API turns into a 503.
+    monkeypatch.setattr("src.decision.get_index", lambda: (_ for _ in ()).throw(EmbeddingError("boom")))
+    with pytest.raises(DecisionUnavailableError):
+        select_context(TicketCreate(message="my order arrived damaged"))
+
+
 def test_index_round_trips_through_disk(tmp_path, fake_embed):
     index_path = tmp_path / "index.npz"
     built = build_index(index_path=index_path)
