@@ -85,11 +85,61 @@ Every feature below is implemented and covered by tests.
 
 ## Screenshots
 
-> No screenshots are committed yet.
->
-> To add them, run the app with a demo account, capture the screens below, save them in `assets/screenshots/`, and reference them here. For example: `![New decision](assets/screenshots/new-decision.png)`.
->
-> Suggested: **Login**, **New Decision with a result**, **photo evidence with the analysis**, and **the ticket conversation** with an AI reply.
+A complete walkthrough of one damaged-goods ticket, from submission to an approved decision.
+
+### 1. Sign in
+
+Registration and login, with JWT issued by the backend.
+
+![Login screen](assets/screenshots/01-login.png)
+
+### 2. Submit a ticket
+
+The complaint plus whatever order facts are known. Anything unknown is left empty, and the model is told it wasn't provided.
+
+![New Decision form](assets/screenshots/02-new-decision.png)
+
+### 3. The policy decides what happens next
+
+A ₹3,500 order is above the ₹2,000 threshold, so `damaged_goods.md` requires photos **before** anything is approved. The badge reads **Awaiting customer**, and the model's self-rating is shown as an uncalibrated caption, not as a confidence percentage.
+
+![Request Photos decision](assets/screenshots/03-decision-request-photos.png)
+
+### 4. Evidence is requested on the same ticket
+
+The upload appears only when the decision actually asks for it.
+
+![Photos needed, with upload](assets/screenshots/04-photos-needed.png)
+
+### 5. Each photo is examined
+
+A separate vision call describes **only what is visible** and flags it as clear, relevant, and whether it shows the reported problem. Here the packaging photo is clear and relevant but marked as **not** showing the damage itself.
+
+![Photo evidence with analysis](assets/screenshots/05-photo-evidence.png)
+
+### 6. The ticket is reassessed
+
+With the evidence in place, the same ticket moves to **Approve Refund Or Replacement**: a **Clear policy match**, with the reason naming the 7-day window and the ₹2,000 threshold, and `damaged_goods.md` cited.
+
+![Approved decision](assets/screenshots/06-decision-approved.png)
+
+### 7. The customer can keep talking
+
+The AI answers on the same ticket. Asked when the refund arrives, it says plainly that **the available policy doesn't specify** it, rather than inventing a date.
+
+![Conversation with AI replies](assets/screenshots/07-conversation.png)
+
+### 8. A choice is recorded, not carried out
+
+A stated preference is stored as **"recorded, not yet processed"**. It never changes the decision, and nothing is actually refunded or shipped.
+
+![Customer preference recorded](assets/screenshots/08-preference-recorded.png)
+
+### 9. History
+
+Every ticket keeps its full conversation, photos and decision changes, per user.
+
+![Ticket history](assets/screenshots/09-history.png)
 
 ---
 
